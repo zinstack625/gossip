@@ -1,21 +1,33 @@
 use rand::Rng;
 use std::io::prelude::*;
-use std::net;
+use std::net::{TcpListener, TcpStream, SocketAddr};
 use std::sync::mpsc;
 use std::thread;
 
+pub mod neighborhood;
+pub mod whisper;
+
+// TODO: prob throw these functions in a separate file
+// and give their placement some meaning
+
+// TODO: redo the function interface
+// borrow TcpStream and self node
+// return message vector
 fn receive_messages(
-    stream: &mut std::net::TcpStream,
+    stream: &mut TcpStream,
     client_tx: &mpsc::Sender<String>,
     newcomer_mailbox: &mut Vec<whisper::Message>,
-    myself: &network::Node,
+    myself: &neighborhood::Node,
 ) {
+    // TODO: remove communication with client and
+    // make message type matching occur in server func
     let mut buffer: [u8; 4096] = [0; 4096];
     while let Ok(bytes_n) = stream.read(&mut buffer) {
         let mut bytes_vector = buffer.to_vec();
         bytes_vector.resize(bytes_n, 0);
         for split in bytes_vector.split(|byte| *byte == 0) {
             if let Ok(packet) = std::str::from_utf8(split) {
+                // #define Eww
                 if let Ok(msg) = whisper::Message::from_str(packet) {
                     match msg.msgtype {
                         whisper::MessageType::Text => {
@@ -35,12 +47,13 @@ fn receive_messages(
                         }
                     }
                 }
+                // #undef Eww
             }
         }
     }
 }
 
-fn receive_greeting(stream: &mut std::net::TcpStream) -> Result<whisper::Message, std::io::Error> {
+fn receive_greeting(stream: &mut TcpStream) -> Result<whisper::Message, std::io::Error> {
     let mut buffer: [u8; 4096] = [0; 4096];
     let bytes_n = stream.read(&mut buffer)?;
     if let Ok(packet) = std::str::from_utf8(&buffer[..bytes_n - 1]) {
@@ -55,7 +68,7 @@ fn receive_greeting(stream: &mut std::net::TcpStream) -> Result<whisper::Message
 }
 
 fn send_message(
-    stream: &mut std::net::TcpStream,
+    stream: &mut TcpStream,
     msg: &whisper::Message,
 ) -> std::io::Result<usize> {
     let mut packet = msg.to_string().as_bytes().to_vec();
@@ -64,16 +77,17 @@ fn send_message(
     stream.flush()?;
     Ok(bytes_written)
 }
-fn spawn_listener() -> (mpsc::Receiver<std::net::TcpStream>, std::net::SocketAddr) {
+
+fn spawn_listener() -> (mpsc::Receiver<TcpStream>, SocketAddr) {
     let mut local_address = local_ipaddress::get().unwrap();
     let port: u16 = rand::thread_rng().gen_range(7000..50000);
     local_address.push(':');
     local_address.push_str(port.to_string().as_str());
-    let mut local_address: std::net::SocketAddr = local_address.parse().unwrap();
-    let mut listener = std::net::TcpListener::bind(local_address);
+    let mut local_address: SocketAddr = local_address.parse().unwrap();
+    let mut listener = TcpListener::bind(local_address);
     while listener.is_err() {
         local_address.set_port(rand::thread_rng().gen_range(7000..50000));
-        listener = std::net::TcpListener::bind(local_address);
+        listener = TcpListener::bind(local_address);
     }
     let listener = listener.unwrap();
     let (listener_tx, listener_rx) = mpsc::channel();
@@ -91,10 +105,10 @@ fn spawn_listener() -> (mpsc::Receiver<std::net::TcpStream>, std::net::SocketAdd
 }
 
 fn init_connection(
-    address: &std::net::SocketAddr,
+    address: &SocketAddr,
     announcement: &whisper::Message,
-) -> Result<(network::Node, std::net::TcpStream), std::io::Error> {
-    let mut stream = net::TcpStream::connect(address)?;
+) -> Result<(neighborhood::Node, TcpStream), std::io::Error> {
+    let mut stream = TcpStream::connect(address)?;
     stream.set_nonblocking(false);
     send_message(&mut stream, &announcement);
     if let Ok(reply) = receive_greeting(&mut stream) {
@@ -110,11 +124,11 @@ fn init_connection(
     }
 }
 
-fn initial_connection(
+fn initial_connections(
     init_nodes: Vec<String>,
     announcement: &whisper::Message,
-) -> Vec<(network::Node, std::net::TcpStream)> {
-    let mut connections = Vec::<(network::Node, std::net::TcpStream)>::new();
+) -> Vec<(neighborhood::Node, TcpStream)> {
+    let mut connections = Vec::<(neighborhood::Node, TcpStream)>::new();
     connections.reserve(init_nodes.len());
     for i in init_nodes {
         if let Ok(address) = i.parse() {
@@ -133,7 +147,7 @@ pub fn spawn_server(
     let (listener_rx, local_address) = spawn_listener();
     let uuid: u32 = rand::thread_rng().gen();
     println!("I am {}", uuid);
-    let myself = network::Node::new(&client_name, uuid, &local_address);
+    let myself = neighborhood::Node::new(&client_name, uuid, &local_address);
     let announcement = whisper::Message::new(
         whisper::MessageType::NewMember,
         &myself,
@@ -142,7 +156,7 @@ pub fn spawn_server(
         }),
         whisper::Encryption::None,
     );
-    let mut connections = initial_connection(init_nodes, &announcement);
+    let mut connections = initial_connections(init_nodes, &announcement);
     let (tx, client_rx) = mpsc::channel();
     let (client_tx, rx) = mpsc::channel();
     let _server_thread = thread::spawn(move || loop {
@@ -151,6 +165,9 @@ pub fn spawn_server(
         for i in connections.iter_mut() {
             receive_messages(&mut i.1, &tx, &mut newcomer_mailbox, &myself);
         }
+        // TODO: after receive_messages func restructuring
+        // place message sorting right here
+
         // greet the spoken and tell him not to worry introducing me
         for i in newcomer_mailbox.iter() {
             let newcomer = i.sender.clone();
@@ -158,7 +175,7 @@ pub fn spawn_server(
             let mut contents = json::parse(announcement.contents.as_str()).unwrap();
             contents.insert("gossipless", true);
             announcement.contents = json::stringify(contents);
-            if let Ok(node) = init_connection(&newcomer.adress, &announcement) {
+            if let Ok(node) = init_connection(&newcomer.address, &announcement) {
                 connections.push(node);
             }
         }
@@ -222,136 +239,4 @@ pub fn spawn_server(
         thread::sleep(std::time::Duration::from_millis(200));
     });
     (client_tx, client_rx)
-}
-
-pub mod network {
-    #[derive(Clone)]
-    pub struct Node {
-        pub name: String,
-        pub uuid: u32,
-        pub adress: std::net::SocketAddr,
-    }
-    impl PartialEq for Node {
-        fn eq(&self, other: &Node) -> bool {
-            self.uuid == other.uuid
-        }
-    }
-    impl Eq for Node {}
-    impl Node {
-        pub fn to_string(&self) -> String {
-            let mut adress_string = self.adress.ip().to_string();
-            adress_string.push(':');
-            adress_string.push_str(self.adress.port().to_string().as_str());
-            let node = json::object! {
-                name: self.name.clone(),
-                uuid: self.uuid,
-                adress: adress_string,
-            };
-            json::stringify(node)
-        }
-        pub fn from_str(json_node: &str) -> Result<Node, json::Error> {
-            let parse_try = json::parse(json_node);
-            match parse_try {
-                Err(parse_error) => Err(parse_error),
-                Ok(mut json_tree) => Ok(Node {
-                    name: json_tree["name"].take_string().unwrap(),
-                    uuid: match std::convert::TryFrom::try_from(
-                        json_tree["uuid"].as_number().unwrap(),
-                    ) {
-                        Ok(num) => num,
-                        _ => 0,
-                    },
-                    adress: json_tree["adress"].take_string().unwrap().parse().unwrap(),
-                }),
-            }
-        }
-        pub fn new(name: &String, uuid: u32, adress: &std::net::SocketAddr) -> Node {
-            Node {
-                name: name.clone(),
-                uuid,
-                adress: adress.clone(),
-            }
-        }
-    }
-}
-
-pub mod whisper {
-    #[derive(Copy, Clone)]
-    pub enum Encryption {
-        AES256,
-        None,
-    }
-    #[derive(Copy, Clone)]
-    pub enum MessageType {
-        Text,
-        NewMember,
-    }
-    #[derive(Clone)]
-    pub struct Message {
-        pub msgtype: MessageType,
-        pub sender: crate::network::Node,
-        pub contents: String,
-        pub encryption: Encryption,
-    }
-    impl Message {
-        pub fn new(
-            msgtype: MessageType,
-            sender: &crate::network::Node,
-            contents: &String,
-            encryption: Encryption,
-        ) -> Message {
-            Message {
-                msgtype,
-                sender: sender.clone(),
-                contents: contents.clone(),
-                encryption,
-            }
-        }
-        pub fn format(&self) -> String {
-            let mut formatted_message = String::new();
-            formatted_message.push_str(self.sender.to_string().as_str());
-            formatted_message.push_str(": ");
-            formatted_message.push_str(self.contents.as_str());
-            formatted_message
-        }
-        pub fn to_string(&self) -> String {
-            let message = json::object! {
-                msgtype: match self.msgtype {
-                    MessageType::NewMember => "NewMember",
-                    MessageType::Text => "Text",
-                },
-                sender: self.sender.to_string(),
-                contents: self.contents.clone(),
-                encryption: match self.encryption {
-                    Encryption::AES256 => "AES256",
-                    Encryption::None => "None",
-                },
-            };
-            json::stringify(message)
-        }
-        pub fn from_str(json_string: &str) -> Result<Message, json::Error> {
-            let parse_try = json::parse(json_string);
-            match parse_try {
-                Err(parse_error) => Err(parse_error),
-                Ok(mut json_node) => {
-                    let parsed_msg = Message {
-                        msgtype: match json_node["msgtype"].take_string().unwrap().as_str() {
-                            "NewMember" => MessageType::NewMember,
-                            _ => MessageType::Text,
-                        },
-                        sender: crate::network::Node::from_str(
-                            json_node["sender"].take_string().unwrap().as_str(),
-                        )
-                        .unwrap(),
-                        contents: json_node["contents"].take_string().unwrap(),
-                        encryption: match json_node["encryption"].take_string().unwrap().as_str() {
-                            "AES256" => Encryption::AES256,
-                            _ => Encryption::None,
-                        },
-                    };
-                    Ok(parsed_msg)
-                }
-            }
-        }
-    }
 }
