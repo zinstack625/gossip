@@ -1,0 +1,9 @@
+[package]
+name = "gossip"
+version = "0.1.0"
+edition = "2018"
+
+[dependencies]
+json = "0.12.4"
+local_ipaddress = "0.1.3"
+rand = "0.8.4"
