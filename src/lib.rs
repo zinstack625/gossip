@@ -1,6 +1,6 @@
 use rand::Rng;
 use std::io::prelude::*;
-use std::net::{TcpListener, TcpStream, SocketAddr};
+use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::mpsc;
 use std::thread;
 
@@ -10,47 +10,21 @@ pub mod whisper;
 // TODO: prob throw these functions in a separate file
 // and give their placement some meaning
 
-// TODO: redo the function interface
-// borrow TcpStream and self node
-// return message vector
-fn receive_messages(
-    stream: &mut TcpStream,
-    client_tx: &mpsc::Sender<String>,
-    newcomer_mailbox: &mut Vec<whisper::Message>,
-    myself: &neighborhood::Node,
-) {
-    // TODO: remove communication with client and
-    // make message type matching occur in server func
+fn receive_messages(stream: &mut TcpStream) -> Vec<whisper::Message> {
+    let mut messages = Vec::<whisper::Message>::new();
     let mut buffer: [u8; 4096] = [0; 4096];
     while let Ok(bytes_n) = stream.read(&mut buffer) {
         let mut bytes_vector = buffer.to_vec();
         bytes_vector.resize(bytes_n, 0);
         for split in bytes_vector.split(|byte| *byte == 0) {
             if let Ok(packet) = std::str::from_utf8(split) {
-                // #define Eww
                 if let Ok(msg) = whisper::Message::from_str(packet) {
-                    match msg.msgtype {
-                        whisper::MessageType::Text => {
-                            client_tx
-                                .send(msg.format())
-                                .expect("Unable to send message to client!");
-                        }
-                        whisper::MessageType::NewMember => {
-                            let mut message_contents = json::parse(msg.contents.as_str()).unwrap();
-                            message_contents["aquaintance"].push(myself.uuid).unwrap();
-                            newcomer_mailbox.push(whisper::Message::new(
-                                msg.msgtype,
-                                &msg.sender,
-                                &json::stringify(message_contents),
-                                msg.encryption,
-                            ));
-                        }
-                    }
+                    messages.push(msg);
                 }
-                // #undef Eww
             }
         }
     }
+    messages
 }
 
 fn receive_greeting(stream: &mut TcpStream) -> Result<whisper::Message, std::io::Error> {
@@ -67,10 +41,7 @@ fn receive_greeting(stream: &mut TcpStream) -> Result<whisper::Message, std::io:
     ))
 }
 
-fn send_message(
-    stream: &mut TcpStream,
-    msg: &whisper::Message,
-) -> std::io::Result<usize> {
+fn send_message(stream: &mut TcpStream, msg: &whisper::Message) -> std::io::Result<usize> {
     let mut packet = msg.to_string().as_bytes().to_vec();
     packet.push(0);
     let bytes_written = stream.write(&packet[..])?;
@@ -80,6 +51,7 @@ fn send_message(
 
 fn spawn_listener() -> (mpsc::Receiver<TcpStream>, SocketAddr) {
     let mut local_address = local_ipaddress::get().unwrap();
+    //let mut local_address = String::from("127.0.0.1");
     let port: u16 = rand::thread_rng().gen_range(7000..50000);
     local_address.push(':');
     local_address.push_str(port.to_string().as_str());
@@ -162,11 +134,29 @@ pub fn spawn_server(
     let _server_thread = thread::spawn(move || loop {
         // mailbox
         let mut newcomer_mailbox: Vec<whisper::Message> = Vec::new();
+        let mut mailbox = Vec::<whisper::Message>::new();
         for i in connections.iter_mut() {
-            receive_messages(&mut i.1, &tx, &mut newcomer_mailbox, &myself);
+            let connection_messages = receive_messages(&mut i.1);
+            mailbox.extend(connection_messages);
         }
-        // TODO: after receive_messages func restructuring
-        // place message sorting right here
+        for i in mailbox {
+            match i.msgtype {
+                whisper::MessageType::Text => {
+                    tx.send(i.format())
+                        .expect("Unable to send message to client!");
+                }
+                whisper::MessageType::NewMember => {
+                    let mut message_contents = json::parse(i.contents.as_str()).unwrap();
+                    message_contents["aquaintance"].push(myself.uuid).unwrap();
+                    newcomer_mailbox.push(whisper::Message::new(
+                        i.msgtype,
+                        &i.sender,
+                        &json::stringify(message_contents),
+                        i.encryption,
+                    ));
+                }
+            }
+        }
 
         // greet the spoken and tell him not to worry introducing me
         for i in newcomer_mailbox.iter() {
