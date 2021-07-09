@@ -1,5 +1,5 @@
 use rand::Rng;
-use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, TcpStream};
 use std::sync::mpsc;
 use std::thread;
 
@@ -8,12 +8,8 @@ pub mod whisper;
 pub mod speach;
 
 fn spawn_listener() -> (mpsc::Receiver<TcpStream>, SocketAddr) {
-    let mut local_address = local_ipaddress::get().unwrap();
-    //let mut local_address = String::from("127.0.0.1");
     let port: u16 = rand::thread_rng().gen_range(7000..50000);
-    local_address.push(':');
-    local_address.push_str(port.to_string().as_str());
-    let mut local_address: SocketAddr = local_address.parse().unwrap();
+    let mut local_address = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), port);
     let mut listener = TcpListener::bind(local_address);
     while listener.is_err() {
         local_address.set_port(rand::thread_rng().gen_range(7000..50000));
@@ -87,6 +83,7 @@ pub fn spawn_server(
             let mut contents = json::parse(announcement.contents.as_str()).unwrap();
             contents.insert("gossipless", true);
             announcement.contents = json::stringify(contents);
+            println!("Was told to connect to {}", newcomer.address);
             if let Ok(node) = speach::init_connection(&newcomer.address, &announcement) {
                 connections.push(node);
             }
@@ -109,13 +106,16 @@ pub fn spawn_server(
         // create gossip
         let mut newcomer_mailbox: Vec<crate::whisper::Message> = Vec::new();
         while let Ok(mut new_connection) = listener_rx.try_recv() {
-            if let Ok(message) = speach::receive_greeting(&mut new_connection) {
+            if let Ok(mut message) = speach::receive_greeting(&mut new_connection) {
                 println!(
                     "New connection from {}",
                     new_connection.peer_addr().unwrap()
                 );
                 new_connection.set_nonblocking(true).unwrap();
                 speach::send_message(&mut new_connection, &announcement);
+                // sender doesn't know it's adress, so we tell everyone where from we got the
+                // message
+                message.sender.address.set_ip(new_connection.peer_addr().unwrap().ip());
                 let mut message_contents = json::parse(message.contents.as_str()).unwrap();
                 if !message_contents.has_key("gossipless") {
                     message_contents["aquaintance"].push(uuid).unwrap();
