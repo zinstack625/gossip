@@ -54,8 +54,10 @@ pub fn spawn_server(
         let mut newcomer_mailbox: Vec<crate::whisper::Message> = Vec::new();
         let mut mailbox = Vec::<crate::whisper::Message>::new();
         for i in connections.iter_mut() {
-            let connection_messages = speach::receive_messages(&mut i.1);
-            mailbox.extend(connection_messages);
+            if let Some(stream) = i.1.as_mut() {
+                let connection_messages = speach::receive_messages(stream);
+                mailbox.extend(connection_messages);
+            }
         }
         for i in mailbox.iter_mut() {
             match i.msgtype {
@@ -84,8 +86,15 @@ pub fn spawn_server(
             contents.insert("gossipless", true);
             announcement.contents = json::stringify(contents);
             println!("Was told to connect to {}", newcomer.address);
+            let mut greeted = false;
+            for i in connections.iter() {
+                if i.0.uuid == newcomer.uuid { greeted = true; break; }
+            }
+            if greeted { return; }
             if let Ok(node) = speach::init_connection(&newcomer.address, &announcement) {
                 connections.push(node);
+            } else {
+                connections.push((newcomer, None));
             }
         }
         // don't propagate the gossip (for now)
@@ -99,7 +108,9 @@ pub fn spawn_server(
                 crate::whisper::Encryption::None,
             );
             for i in connections.iter_mut() {
-                speach::send_message(&mut i.1, &msg);
+                if let Some(stream) = i.1.as_mut() {
+                    speach::send_message(stream, &msg);
+                }
             }
         }
         // direct connections
@@ -126,25 +137,27 @@ pub fn spawn_server(
                         message.encryption,
                     ));
                 }
-                connections.push((message.sender.clone(), new_connection));
+                connections.push((message.sender.clone(), Some(new_connection)));
             }
         }
         // spread the gossip (for now to everyone)
         for i in newcomer_mailbox.iter() {
             let message_contents = json::parse(i.contents.clone().as_str()).unwrap();
-            for j in connections.iter_mut().enumerate() {
+            for j in connections.iter_mut() {
                 println!(
                     "Greeting from {} is aquainted with {}",
                     i.sender.name, message_contents["aquaintance"]
                 );
 
-                if !message_contents["aquaintance"].contains(j.1 .0.uuid) {
+                if !message_contents["aquaintance"].contains(j.0.uuid) && j.1.is_some() {
+                    if let Some(stream) = j.1.as_mut() {
                     println!(
                         "Sending greeting to uuid {}, address {}",
-                        j.1 .0.uuid,
-                        j.1 .1.peer_addr().unwrap()
+                        j.0.uuid,
+                        stream.peer_addr().unwrap()
                     );
-                    speach::send_message(&mut j.1 .1, i);
+                    speach::send_message(stream, i);
+                    }
                 }
             }
         }

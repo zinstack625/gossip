@@ -46,7 +46,7 @@ pub fn send_message(
 pub fn init_connection(
     address: &SocketAddr,
     announcement: &crate::whisper::Message,
-) -> Result<(crate::neighborhood::Node, TcpStream), std::io::Error> {
+) -> Result<(crate::neighborhood::Node, Option<TcpStream>), std::io::Error> {
     let mut stream = TcpStream::connect(address)?;
     stream.set_nonblocking(false);
     send_message(&mut stream, &announcement);
@@ -54,7 +54,7 @@ pub fn init_connection(
         stream
             .set_nonblocking(true)
             .expect("Unable to set TCP stream async");
-        Ok((reply.sender, stream))
+        Ok((reply.sender, Some(stream)))
     } else {
         Err(std::io::Error::new(
             std::io::ErrorKind::ConnectionRefused,
@@ -66,8 +66,8 @@ pub fn init_connection(
 pub fn initial_connections(
     init_nodes: Vec<String>,
     announcement: &crate::whisper::Message,
-) -> Vec<(crate::neighborhood::Node, TcpStream)> {
-    let mut connections = Vec::<(crate::neighborhood::Node, TcpStream)>::new();
+) -> Vec<(crate::neighborhood::Node, Option<TcpStream>)> {
+    let mut connections = Vec::<(crate::neighborhood::Node, Option<TcpStream>)>::new();
     connections.reserve(init_nodes.len());
     for i in init_nodes {
         if let Ok(address) = i.parse() {
