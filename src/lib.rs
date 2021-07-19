@@ -1,4 +1,5 @@
 use rand::Rng;
+use rand::seq::SliceRandom;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, TcpStream};
 use std::sync::mpsc;
 use std::thread;
@@ -32,30 +33,42 @@ fn spawn_listener() -> (mpsc::Receiver<TcpStream>, SocketAddr) {
 
 pub fn spawn_server(
     client_name: String,
-    init_nodes: Vec<String>,
+    init_nodes: Vec<SocketAddr>,
 ) -> (mpsc::Sender<String>, mpsc::Receiver<String>) {
     let (listener_rx, local_address) = spawn_listener();
     let uuid: u32 = rand::thread_rng().gen();
     println!("I am {}", uuid);
+    let cipher = openssl::symm::Cipher::aes_256_gcm();
     let myself = neighborhood::Node::new(&client_name, uuid, &local_address);
-    let announcement = crate::whisper::Message::new(
-        crate::whisper::MessageType::NewMember,
+    let announcement = whisper::Message::new(
+        whisper::MessageType::NewMember,
         &myself,
         &json::stringify(json::object! {
             aquaintance: [ uuid ],
-        }),
-        crate::whisper::Encryption::None,
-    );
+        }));
     let mut connections = speach::initial_connections(init_nodes, &announcement);
+    let (enc_key, iv) = match connections.is_empty() {
+        true => {
+            let mut iv = vec![0u8; cipher.iv_len().unwrap()];
+            let mut key = vec![0u8; cipher.key_len()];
+            openssl::rand::rand_bytes(&mut key);
+            openssl::rand::rand_bytes(&mut iv);
+            (key, iv)
+        },
+        false => {
+            speach::get_key_and_iv(connections.choose_mut(&mut rand::thread_rng()).unwrap(), &myself).unwrap()
+        },
+    };
     let (tx, client_rx) = mpsc::channel();
     let (client_tx, rx) = mpsc::channel();
-    let _server_thread = thread::spawn(move || loop {
+    let _server_thread = thread::spawn(move || {
+        loop {
         // mailbox
         let mut newcomer_mailbox: Vec<crate::whisper::Message> = Vec::new();
         let mut mailbox = Vec::<crate::whisper::Message>::new();
         for i in connections.iter_mut() {
             if let Some(stream) = i.1.as_mut() {
-                let connection_messages = speach::receive_messages(stream);
+                let connection_messages = speach::receive_messages_enc(stream, &cipher, &enc_key, &iv);
                 mailbox.extend(connection_messages);
             }
         }
@@ -64,17 +77,16 @@ pub fn spawn_server(
                 crate::whisper::MessageType::Text => {
                     tx.send(i.format())
                         .expect("Unable to send message to client!");
-                }
+                },
                 crate::whisper::MessageType::NewMember => {
                     let mut message_contents = json::parse(i.contents.as_str()).unwrap();
                     message_contents["aquaintance"].push(myself.uuid).unwrap();
                     newcomer_mailbox.push(crate::whisper::Message::new(
                         i.msgtype,
                         &i.sender,
-                        &json::stringify(message_contents),
-                        i.encryption,
-                    ));
-                }
+                        &json::stringify(message_contents)));
+                },
+                whisper::MessageType::EncryptionRequest => {} // cannot happen, as those can only be unencrypted
             }
         }
 
@@ -104,27 +116,42 @@ pub fn spawn_server(
             let msg = crate::whisper::Message::new(
                 crate::whisper::MessageType::Text,
                 &myself,
-                &msg_text,
-                crate::whisper::Encryption::None,
-            );
+                &msg_text);
             for i in connections.iter_mut() {
                 if let Some(stream) = i.1.as_mut() {
-                    speach::send_message(stream, &msg);
+                    speach::send_message_enc(stream, &msg, &cipher, &enc_key, &iv);
                 }
             }
         }
         // direct connections
         // create gossip
-        let mut newcomer_mailbox: Vec<crate::whisper::Message> = Vec::new();
+        let mut newcomer_mailbox = Vec::<crate::whisper::Message>::new();
         while let Ok(mut new_connection) = listener_rx.try_recv() {
             if let Ok(mut message) = speach::receive_greeting(&mut new_connection) {
                 println!(
                     "New connection from {}",
                     new_connection.peer_addr().unwrap()
                 );
-                new_connection.set_nonblocking(true).unwrap();
                 speach::send_message(&mut new_connection, &announcement);
-                // sender doesn't know it's adress, so we tell everyone where from we got the
+                // sender should ask about encryption now
+                let requests = speach::receive_greeting(&mut new_connection);
+                new_connection.set_nonblocking(true).unwrap();
+                let mut encryption_request: Option<whisper::Message> = None;
+                for i in requests {
+                    if i.msgtype == whisper::MessageType::EncryptionRequest {
+                        encryption_request = Some(i);
+                    }
+                }
+                if let Some(encryption_request) = encryption_request {
+                    let public_key = encryption_request.contents.as_bytes();
+                    let pkey_temp = openssl::pkey::PKey::public_key_from_pem(public_key).unwrap();
+                    let temp_encrypter = openssl::encrypt::Encrypter::new(&pkey_temp).unwrap();
+                    if speach::authenticate(&encryption_request.sender, &mut new_connection) {
+                        speach::send_encryption_data(&mut new_connection, &enc_key, &temp_encrypter);
+                        speach::send_encryption_data(&mut new_connection, &iv, &temp_encrypter);
+                    }
+                }
+                // sender doesn't know it's address, so we tell everyone where from we got the
                 // message
                 message.sender.address.set_ip(new_connection.peer_addr().unwrap().ip());
                 let mut message_contents = json::parse(message.contents.as_str()).unwrap();
@@ -133,9 +160,7 @@ pub fn spawn_server(
                     newcomer_mailbox.push(crate::whisper::Message::new(
                         message.msgtype,
                         &message.sender,
-                        &json::stringify(message_contents),
-                        message.encryption,
-                    ));
+                        &json::stringify(message_contents)));
                 }
                 connections.push((message.sender.clone(), Some(new_connection)));
             }
@@ -156,12 +181,12 @@ pub fn spawn_server(
                         j.0.uuid,
                         stream.peer_addr().unwrap()
                     );
-                    speach::send_message(stream, i);
+                    speach::send_message_enc(stream, i, &cipher, &enc_key, &iv);
                     }
                 }
             }
         }
         thread::sleep(std::time::Duration::from_millis(200));
-    });
+    }});
     (client_tx, client_rx)
 }

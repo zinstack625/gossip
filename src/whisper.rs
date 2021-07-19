@@ -1,32 +1,25 @@
-#[derive(Copy, Clone)]
-pub enum Encryption {
-    AES256,
-    None,
-}
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, PartialEq)]
 pub enum MessageType {
     Text,
     NewMember,
+    EncryptionRequest,
 }
 #[derive(Clone)]
 pub struct Message {
     pub msgtype: MessageType,
     pub sender: crate::neighborhood::Node,
     pub contents: String,
-    pub encryption: Encryption,
 }
 impl Message {
     pub fn new(
         msgtype: MessageType,
         sender: &crate::neighborhood::Node,
         contents: &String,
-        encryption: Encryption,
     ) -> Message {
         Message {
             msgtype,
             sender: sender.clone(),
             contents: contents.clone(),
-            encryption,
         }
     }
     pub fn format(&self) -> String {
@@ -41,13 +34,10 @@ impl Message {
             msgtype: match self.msgtype {
                 MessageType::NewMember => "NewMember",
                 MessageType::Text => "Text",
+                MessageType::EncryptionRequest => "EncryptionRequest",
             },
             sender: self.sender.to_string(),
             contents: self.contents.clone(),
-            encryption: match self.encryption {
-                Encryption::AES256 => "AES256",
-                Encryption::None => "None",
-            },
         };
         json::stringify(message)
     }
@@ -59,6 +49,7 @@ impl Message {
                 let parsed_msg = Message {
                     msgtype: match json_node["msgtype"].take_string().unwrap().as_str() {
                         "NewMember" => MessageType::NewMember,
+                        "EncryptionRequest" => MessageType::EncryptionRequest,
                         _ => MessageType::Text,
                     },
                     sender: crate::neighborhood::Node::from_str(
@@ -66,10 +57,6 @@ impl Message {
                     )
                     .unwrap(),
                     contents: json_node["contents"].take_string().unwrap(),
-                    encryption: match json_node["encryption"].take_string().unwrap().as_str() {
-                        "AES256" => Encryption::AES256,
-                        _ => Encryption::None,
-                    },
                 };
                 Ok(parsed_msg)
             }
