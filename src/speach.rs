@@ -63,37 +63,6 @@ pub fn receive_greeting(stream: &mut TcpStream) -> Result<crate::whisper::Messag
     Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "Invalid greeting"))
 }
 
-pub fn send_message(
-    stream: &mut TcpStream,
-    msg: &crate::whisper::Message,
-) -> std::io::Result<usize> {
-    let packet = msg.to_string().as_bytes().to_vec();
-    let mut bytes_written = stream.write(&(packet.len() as u64).to_be_bytes())?;
-    bytes_written += stream.write(&packet)?;
-    stream.flush()?;
-    Ok(bytes_written)
-}
-
-pub fn send_message_enc(
-    stream: &mut TcpStream,
-    msg: &crate::whisper::Message,
-    cipher: &Cipher,
-    key: &[u8],
-    iv: &[u8]) -> std::io::Result<usize> {
-    let packet = msg.to_string().as_bytes().to_vec();
-    let buffer_len = packet.len() + cipher.block_size();
-    let mut encrypt = Crypter::new(*cipher, Mode::Encrypt, key, Some(iv)).unwrap();
-    let mut encrypted = vec![0u8; buffer_len];
-    let mut count = encrypt.update(&packet, &mut encrypted).unwrap();
-    //count += encrypt.finalize(&mut encrypted).unwrap();
-    encrypted.truncate(count);
-    let mut bytes_written = stream.write(&(count as u64).to_be_bytes())?;
-    encrypt.finalize(&mut encrypted);
-    bytes_written += stream.write(&encrypted[..])?;
-    stream.flush()?;
-    Ok(bytes_written)
-}
-
 pub fn send_data(
     stream: &mut TcpStream,
     data: &[u8]) -> std::io::Result<usize> {
@@ -108,7 +77,7 @@ pub fn init_connection(
 ) -> Result<(crate::neighborhood::Node, Option<TcpStream>), std::io::Error> {
     let mut stream = TcpStream::connect(address)?;
     stream.set_nonblocking(false);
-    send_message(&mut stream, &announcement);
+    send_data(&mut stream, announcement.to_string().as_bytes());
     if let Ok(reply) = receive_greeting(&mut stream) {
         stream
             .set_nonblocking(true)
@@ -146,7 +115,7 @@ pub fn get_key_and_iv(peer: &mut (crate::neighborhood::Node, Option<TcpStream>),
     let decrypter = Decrypter::new(&pkey).unwrap();
     if let Some(stream) = peer.1.as_mut() {
         stream.set_nonblocking(false);
-        send_message(stream, &request);
+        send_data(stream, request.to_string().as_bytes());
         let key = get_encryption_data(stream, &decrypter).unwrap_or_default();
         let iv = get_encryption_data(stream, &decrypter).unwrap_or_default();
         stream.set_nonblocking(true);

@@ -1,3 +1,5 @@
+use openssl::symm::*;
+
 #[derive(Copy, Clone, PartialEq)]
 pub enum MessageType {
     Text,
@@ -61,5 +63,15 @@ impl Message {
                 Ok(parsed_msg)
             }
         }
+    }
+    pub fn encrypt(&self, cipher: &Cipher, key: &[u8], iv: &[u8]) -> Result<Vec<u8>, openssl::error::ErrorStack> {
+        let bytes = self.to_string().as_bytes().to_vec();
+        let buffer_len = bytes.len() + cipher.block_size();
+        let mut encrypter = Crypter::new(*cipher, Mode::Encrypt, key, Some(iv))?;
+        let mut encrypted = vec![0u8; buffer_len];
+        let mut count = encrypter.update(&bytes, &mut encrypted)?;
+        count += encrypter.finalize(&mut encrypted)?;
+        encrypted.truncate(count);
+        Ok(encrypted)
     }
 }
