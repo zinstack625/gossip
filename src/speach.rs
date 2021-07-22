@@ -66,8 +66,10 @@ pub fn receive_greeting(stream: &mut TcpStream) -> Result<crate::whisper::Messag
 pub fn send_data(
     stream: &mut TcpStream,
     data: &[u8]) -> std::io::Result<usize> {
-    let mut count = stream.write(&data.len().to_be_bytes())?;
-    count += stream.write(&data)?;
+    let datalen = data.len().to_be_bytes();
+    let packet = &[std::io::IoSlice::new(&datalen),
+    std::io::IoSlice::new(data)];
+    let count = stream.write_vectored(packet)?;
     Ok(count)
 }
 
