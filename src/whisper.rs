@@ -11,17 +11,20 @@ pub struct Message {
     pub msgtype: MessageType,
     pub sender: crate::neighborhood::Node,
     pub contents: String,
+    pub aquaintance: Vec<u32>,
 }
 impl Message {
     pub fn new(
         msgtype: MessageType,
         sender: &crate::neighborhood::Node,
         contents: &String,
+        aquaintance: Vec<u32>,
     ) -> Message {
         Message {
             msgtype,
             sender: sender.clone(),
             contents: contents.clone(),
+            aquaintance,
         }
     }
     pub fn format(&self) -> String {
@@ -40,6 +43,7 @@ impl Message {
             },
             sender: self.sender.to_string(),
             contents: self.contents.clone(),
+            aquaintance: self.aquaintance.clone(),
         };
         json::stringify(message)
     }
@@ -59,6 +63,13 @@ impl Message {
                     )
                     .unwrap(),
                     contents: json_node["contents"].take_string().unwrap(),
+                    aquaintance: {
+                        let mut aquaintance_vec = Vec::<u32>::with_capacity(json_node["aquaintance"].len());
+                        for i in json_node["aquaintance"].members() {
+                            aquaintance_vec.push(i.as_u32().unwrap_or_default());
+                        }
+                        aquaintance_vec
+                    },
                 };
                 Ok(parsed_msg)
             }

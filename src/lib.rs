@@ -4,6 +4,7 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, TcpStream};
 use std::sync::mpsc;
 use std::thread;
 
+pub mod config;
 pub mod neighborhood;
 pub mod speach;
 pub mod whisper;
@@ -34,6 +35,7 @@ fn spawn_listener() -> (mpsc::Receiver<TcpStream>, SocketAddr) {
 pub fn spawn_server(
     client_name: String,
     init_nodes: Vec<SocketAddr>,
+    config: config::Config,
 ) -> (mpsc::Sender<String>, mpsc::Receiver<String>) {
     let (listener_rx, local_address) = spawn_listener();
     let uuid: u32 = rand::thread_rng().gen();
@@ -43,9 +45,8 @@ pub fn spawn_server(
     let announcement = whisper::Message::new(
         whisper::MessageType::NewMember,
         &myself,
-        &json::stringify(json::object! {
-            aquaintance: [ uuid ],
-        }),
+        &String::from(""),
+        vec![uuid],
     );
     let mut connections = speach::initial_connections(init_nodes, &announcement);
     let (enc_key, iv) = match connections.is_empty() {
@@ -85,13 +86,8 @@ pub fn spawn_server(
                             .expect("Unable to send message to client!");
                     }
                     crate::whisper::MessageType::NewMember => {
-                        let mut message_contents = json::parse(i.contents.as_str()).unwrap();
-                        message_contents["aquaintance"].push(myself.uuid).unwrap();
-                        newcomer_mailbox.push(crate::whisper::Message::new(
-                            i.msgtype,
-                            &i.sender,
-                            &json::stringify(message_contents),
-                        ));
+                        i.aquaintance.push(uuid);
+                        newcomer_mailbox.push(i.clone());
                     }
                     whisper::MessageType::EncryptionRequest => {} // cannot happen, as those can only be unencrypted
                 }
@@ -100,9 +96,7 @@ pub fn spawn_server(
             for i in newcomer_mailbox.iter() {
                 let newcomer = i.sender.clone();
                 let mut announcement = announcement.clone();
-                let mut contents = json::parse(announcement.contents.as_str()).unwrap();
-                contents.insert("gossipless", true);
-                announcement.contents = json::stringify(contents);
+                announcement.contents = String::from("gossipless");
                 println!("Was told to connect to {}", newcomer.address);
                 let mut greeted = false;
                 for i in connections.iter() {
@@ -112,11 +106,13 @@ pub fn spawn_server(
                     }
                 }
                 if greeted {
+                    // already connected
                     return;
                 }
                 if let Ok(node) = speach::init_connection(&newcomer.address, &announcement) {
                     connections.push(node);
                 } else {
+                    // aknowledge peer's existence
                     connections.push((newcomer, None));
                 }
             }
@@ -128,6 +124,7 @@ pub fn spawn_server(
                     crate::whisper::MessageType::Text,
                     &myself,
                     &msg_text,
+                    vec![myself.uuid],
                 );
                 let encrypted = msg.encrypt(&cipher, &enc_key, &iv).unwrap();
                 for i in connections.iter_mut() {
@@ -146,28 +143,38 @@ pub fn spawn_server(
                         new_connection.peer_addr().unwrap()
                     );
                     speach::send_data(&mut new_connection, announcement.to_string().as_bytes());
-                    // sender should ask about encryption now
-                    let requests = speach::receive_greeting(&mut new_connection);
-                    new_connection.set_nonblocking(true).unwrap();
-                    let mut encryption_request: Option<whisper::Message> = None;
-                    for i in requests {
-                        if i.msgtype == whisper::MessageType::EncryptionRequest {
-                            encryption_request = Some(i);
+                    if !message.contents.contains("gossipless") {
+                        // sender should ask about encryption now
+                        let requests = speach::receive_greeting(&mut new_connection);
+                        new_connection.set_nonblocking(true).unwrap();
+                        let mut encryption_request: Option<whisper::Message> = None;
+                        for i in requests {
+                            if i.msgtype == whisper::MessageType::EncryptionRequest {
+                                encryption_request = Some(i);
+                            }
                         }
-                    }
-                    if let Some(encryption_request) = encryption_request {
-                        let public_key = encryption_request.contents.as_bytes();
-                        let pkey_temp =
-                            openssl::pkey::PKey::public_key_from_pem(public_key).unwrap();
-                        let temp_encrypter = openssl::encrypt::Encrypter::new(&pkey_temp).unwrap();
-                        if speach::authenticate(&encryption_request.sender, &mut new_connection) {
-                            speach::send_encryption_data(
-                                &mut new_connection,
-                                &enc_key,
-                                &temp_encrypter,
-                            );
-                            speach::send_encryption_data(&mut new_connection, &iv, &temp_encrypter);
+                        if let Some(encryption_request) = encryption_request {
+                            let public_key = encryption_request.contents.as_bytes();
+                            let pkey_temp =
+                                openssl::pkey::PKey::public_key_from_pem(public_key).unwrap();
+                            let temp_encrypter =
+                                openssl::encrypt::Encrypter::new(&pkey_temp).unwrap();
+                            if speach::authenticate(&encryption_request.sender, &mut new_connection)
+                            {
+                                speach::send_encryption_data(
+                                    &mut new_connection,
+                                    &enc_key,
+                                    &temp_encrypter,
+                                );
+                                speach::send_encryption_data(
+                                    &mut new_connection,
+                                    &iv,
+                                    &temp_encrypter,
+                                );
+                            }
                         }
+                    } else {
+                        new_connection.set_nonblocking(true).unwrap();
                     }
                     // sender doesn't know it's address, so we tell everyone where from we got the
                     // message
@@ -175,29 +182,23 @@ pub fn spawn_server(
                         .sender
                         .address
                         .set_ip(new_connection.peer_addr().unwrap().ip());
-                    let mut message_contents = json::parse(message.contents.as_str()).unwrap();
-                    if !message_contents.has_key("gossipless") {
-                        message_contents["aquaintance"].push(uuid).unwrap();
-                        newcomer_mailbox.push(crate::whisper::Message::new(
-                            message.msgtype,
-                            &message.sender,
-                            &json::stringify(message_contents),
-                        ));
+                    if !message.contents.contains("gossipless") {
+                        message.aquaintance.push(uuid);
+                        newcomer_mailbox.push(message.clone());
                     }
                     connections.push((message.sender.clone(), Some(new_connection)));
                 }
             }
             // spread the gossip (for now to everyone)
             for i in newcomer_mailbox.iter() {
-                let message_contents = json::parse(i.contents.clone().as_str()).unwrap();
                 let encrypted = i.encrypt(&cipher, &enc_key, &iv).unwrap();
                 for j in connections.iter_mut() {
                     println!(
-                        "Greeting from {} is aquainted with {}",
-                        i.sender.name, message_contents["aquaintance"]
+                        "Greeting from {} is aquainted with {:?}",
+                        i.sender.name, i.aquaintance
                     );
 
-                    if !message_contents["aquaintance"].contains(j.0.uuid) && j.1.is_some() {
+                    if !i.aquaintance.contains(&j.0.uuid) && j.1.is_some() {
                         if let Some(stream) = j.1.as_mut() {
                             println!(
                                 "Sending greeting to uuid {}, address {}",
