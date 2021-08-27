@@ -113,7 +113,8 @@ pub fn get_key_and_iv(peer: &mut (crate::neighborhood::Node, Option<TcpStream>),
         crate::whisper::MessageType::EncryptionRequest,
         &myself,
         &String::from_utf8(temporary_rsa.public_key_to_pem().unwrap()).unwrap(),
-        Vec::<u32>::new());
+        Vec::<u32>::new(),
+        0);
     let pkey = openssl::pkey::PKey::from_rsa(temporary_rsa).unwrap();
     let decrypter = Decrypter::new(&pkey).unwrap();
     if let Some(stream) = peer.1.as_mut() {
