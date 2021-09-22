@@ -1,5 +1,8 @@
 use rand::seq::SliceRandom;
 use rand::Rng;
+use std::fs::File;
+use std::io::prelude::*;
+use std::io::{BufReader, BufWriter};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, TcpStream};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
@@ -18,6 +21,7 @@ struct State {
     enc_key: Vec<u8>, // this
     iv: Vec<u8>,      // and this needs to go
     config: Arc<Mutex<config::Config>>,
+    conf_change_sig_rx: mpsc::Receiver<usize>,
     tx: mpsc::Sender<whisper::Message>,
     rx: mpsc::Receiver<whisper::Message>,
 }
@@ -123,7 +127,7 @@ fn greet_newcomers(
 
 fn client_duty(
     client_rx: &mut mpsc::Receiver<whisper::Message>,
-    send_limit: usize,
+    config: &config::Config,
     connections: &mut Vec<(neighborhood::Node, Option<TcpStream>)>,
     myself: &neighborhood::Node,
     // absolute awfulness, each stream should have it's own cipher, enc_key and iv. Strong
@@ -132,6 +136,8 @@ fn client_duty(
     enc_key: &[u8],
     iv: &[u8],
 ) {
+    let mut messages_to_store = Vec::<whisper::Message>::new();
+    let send_limit = config.max_send_peers;
     while let Ok(client_msg) = client_rx.try_recv() {
         let mut to_send =
             Vec::<&mut (neighborhood::Node, Option<TcpStream>)>::with_capacity(send_limit);
@@ -167,7 +173,9 @@ fn client_duty(
                 speach::send_data(&mut stream, &encrypted);
             }
         }
+        messages_to_store.push(msg);
     }
+    store_text_messages(&config, &messages_to_store);
 }
 
 // different in that people connect to us directly here instead of us receiving gossip
@@ -303,7 +311,43 @@ fn spread_gossip(
     }
 }
 
+fn get_stored_messages(config: &config::Config) -> Result<Vec<whisper::Message>, std::io::Error> {
+    let file = File::open(&config.stored_messages_filename)?;
+    let msg_database = BufReader::new(file);
+    let mut stored_messages = Vec::<whisper::Message>::new();
+    for i in msg_database.lines() {
+        if let Ok(line) = i {
+            if let Ok(message) = whisper::Message::from_str(line.as_str()) {
+                stored_messages.push(message);
+            }
+        }
+    }
+    Ok(stored_messages)
+}
+
+fn store_text_messages(
+    config: &config::Config,
+    messages: &Vec<whisper::Message>,
+) -> Result<(), std::io::Error> {
+    let file = std::fs::OpenOptions::new()
+        .read(false)
+        .write(true)
+        .create(true)
+        .append(true)
+        .open(&config.stored_messages_filename)?;
+    let mut msg_database = BufWriter::new(file);
+    for i in messages.iter() {
+        if i.msgtype == whisper::MessageType::Text {
+            let mut modified_message = i.to_string();
+            modified_message.push('\n');
+            msg_database.write(modified_message.as_bytes())?;
+        }
+    }
+    Ok(())
+}
+
 fn server_thread(mut state: State) {
+    let mut postponed_storage = Vec::<whisper::Message>::new();
     loop {
         let mut mailbox = recv_messages(
             &mut state.connections,
@@ -311,6 +355,13 @@ fn server_thread(mut state: State) {
             &state.enc_key,
             &state.iv,
         );
+        if let Ok(config) = state.config.try_lock() {
+            if let Err(_) = store_text_messages(&config, &mailbox) {
+                postponed_storage.extend_from_slice(&mailbox[..]);
+            }
+        } else {
+            postponed_storage.extend_from_slice(&mailbox[..]);
+        }
         let mut gossip = Vec::<whisper::Message>::new();
         let mut newcomer_mailbox = Vec::<whisper::Message>::new();
         process_messages(
@@ -330,15 +381,17 @@ fn server_thread(mut state: State) {
             config.max_send_peers
         };
         // input from client
-        client_duty(
-            &mut state.rx,
-            send_limit,
-            &mut state.connections,
-            &state.myself,
-            &state.cipher,
-            &state.enc_key,
-            &state.iv,
-        );
+        if let Ok(config) = state.config.try_lock() {
+            client_duty(
+                &mut state.rx,
+                &config,
+                &mut state.connections,
+                &state.myself,
+                &state.cipher,
+                &state.enc_key,
+                &state.iv,
+            );
+        }
         // direct connections
         // create gossip
         let newcomer_mailbox = receive_newcomers(
@@ -358,6 +411,19 @@ fn server_thread(mut state: State) {
             &state.enc_key,
             &state.iv,
         );
+        if let Ok(_) = state.conf_change_sig_rx.try_recv() {
+            let config = state.config.lock().unwrap();
+            if let Ok(stored_messages) = get_stored_messages(&config) {
+                for i in stored_messages {
+                    match i.msgtype {
+                        whisper::MessageType::Text => {
+                            state.tx.send(i).expect("Unable to send message to client!");
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
         thread::sleep(std::time::Duration::from_millis(200));
     }
 }
@@ -398,12 +464,14 @@ pub fn spawn_server(
         )
         .unwrap(),
     };
+    let (conf_change_sig_tx, conf_change_sig_rx) = mpsc::channel();
     let config = Arc::new(Mutex::new(config::Config::new()));
     let receiver_config = config.clone();
     let _configurator_thread = thread::spawn(move || loop {
         if let Ok(new_config) = config_rx.recv() {
             let mut config = receiver_config.lock().unwrap();
             *config = new_config;
+            conf_change_sig_tx.send(1).expect("Server must have died");
         }
     });
     let (tx, client_rx) = mpsc::channel();
@@ -417,6 +485,7 @@ pub fn spawn_server(
         enc_key,
         iv,
         config,
+        conf_change_sig_rx,
         tx,
         rx,
     };
