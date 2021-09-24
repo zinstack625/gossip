@@ -2,6 +2,7 @@ use rand::seq::SliceRandom;
 use rand::Rng;
 use std::fs::File;
 use std::io::prelude::*;
+use std::io::Result;
 use std::io::{BufReader, BufWriter};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, TcpStream};
 use std::sync::{mpsc, Arc, Mutex};
@@ -240,78 +241,45 @@ fn receive_newcomers(
 }
 
 fn spread_gossip(
-    newcomer_mailbox: Vec<whisper::Message>,
-    gossip: &mut Vec<whisper::Message>,
+    mailbox: Vec<whisper::Message>,
     connections: &mut Vec<(neighborhood::Node, Option<TcpStream>)>,
-    send_limit: usize,
+    mut send_limit: usize,
     cipher: &openssl::symm::Cipher,
     enc_key: &[u8],
     iv: &[u8],
-) {
+) -> Result<()> {
+    let mut to_send = Vec::<u32>::with_capacity(connections.len());
+    for i in connections.iter() {
+        if i.1.is_some() {
+            to_send.push(i.0.uuid);
+        }
+    }
     // direct connections
-    for i in newcomer_mailbox {
-        let encrypted = i.encrypt(&cipher, &enc_key, &iv).unwrap();
-        for j in connections.iter_mut() {
-            println!(
-                "Greeting from {} is aquainted with {:?}",
-                i.sender.name, i.aquaintance
-            );
-
-            if !i.aquaintance.contains(&j.0.uuid) && j.1.is_some() {
-                if let Some(stream) = j.1.as_mut() {
-                    println!(
-                        "Sending greeting to uuid {}, address {}",
-                        j.0.uuid,
-                        stream.peer_addr().unwrap()
-                    );
-                    speach::send_data(stream, &encrypted);
+    for i in connections.iter_mut() {
+        if send_limit == 0 {
+            return Ok(());
+        }
+        if i.1.is_none() {
+            continue;
+        }
+        // it is essential to send each and every message here if possible, otherwise data will be lost in the network
+        for mut j in mailbox.clone() {
+            if !j.aquaintance.contains(&i.0.uuid) {
+                // have to let the receiver know who's seen the message already
+                for k in to_send.iter() {
+                    j.aquaintance.push(*k);
                 }
+                j.next_sender = *to_send.last().unwrap();
+                let encrypted = j.encrypt(&cipher, &enc_key, &iv).unwrap();
+                speach::send_data(i.1.as_mut().unwrap(), &encrypted);
             }
         }
+        send_limit -= 1;
     }
-    // network reported
-    for i in gossip.iter_mut() {
-        let mut to_send =
-            Vec::<&mut (neighborhood::Node, Option<TcpStream>)>::with_capacity(send_limit);
-        let mut cnt = 0;
-        let connection_len = connections.len();
-        for j in connections.iter_mut() {
-            if !i.aquaintance.contains(&j.0.uuid) {
-                if let Some(_) = j.1 {
-                    to_send.push(j);
-                    cnt += 1;
-                }
-                if cnt >= send_limit {
-                    break;
-                }
-            }
-        }
-        let mut aquaintance = Vec::<u32>::with_capacity(send_limit + i.aquaintance.len());
-        aquaintance.append(&mut i.aquaintance);
-        for i in to_send.iter() {
-            aquaintance.push(i.0.uuid);
-        }
-        let need_duty_shift = aquaintance.len() < connection_len;
-        let msg = whisper::Message::new(
-            i.msgtype,
-            &i.sender,
-            &i.contents,
-            aquaintance,
-            match need_duty_shift {
-                true => to_send.last().unwrap().0.uuid,
-                false => 0,
-            },
-        );
-        let encrypted = msg.encrypt(&cipher, &enc_key, &iv).unwrap();
-        for i in to_send.iter_mut() {
-            if let Some(mut stream) = i.1.as_mut() {
-                speach::send_data(&mut stream, &encrypted);
-            }
-        }
-    }
+    Ok(())
 }
 
-fn get_stored_messages(config: &config::Config) -> Result<Vec<whisper::Message>, std::io::Error> {
+fn get_stored_messages(config: &config::Config) -> Result<Vec<whisper::Message>> {
     let file = File::open(&config.stored_messages_filename)?;
     let msg_database = BufReader::new(file);
     let mut stored_messages = Vec::<whisper::Message>::new();
@@ -325,10 +293,7 @@ fn get_stored_messages(config: &config::Config) -> Result<Vec<whisper::Message>,
     Ok(stored_messages)
 }
 
-fn store_text_messages(
-    config: &config::Config,
-    messages: &Vec<whisper::Message>,
-) -> Result<(), std::io::Error> {
+fn store_text_messages(config: &config::Config, messages: &Vec<whisper::Message>) -> Result<()> {
     let file = std::fs::OpenOptions::new()
         .read(false)
         .write(true)
@@ -394,7 +359,7 @@ fn server_thread(mut state: State) {
         }
         // direct connections
         // create gossip
-        let newcomer_mailbox = receive_newcomers(
+        let mut newcomer_mailbox = receive_newcomers(
             &mut state.listener_rx,
             &state.announcement,
             &mut state.connections,
@@ -402,9 +367,11 @@ fn server_thread(mut state: State) {
             &state.enc_key,
             &state.iv,
         );
+        //if newcomer_mailbox.is_ok() {
+        gossip.append(&mut newcomer_mailbox);
+        //}
         spread_gossip(
-            newcomer_mailbox,
-            &mut gossip,
+            gossip,
             &mut state.connections,
             send_limit,
             &state.cipher,
