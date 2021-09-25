@@ -10,7 +10,7 @@ use std::thread;
 
 pub mod config;
 pub mod neighborhood;
-pub mod speach;
+mod speach;
 pub mod whisper;
 
 struct State {
@@ -126,6 +126,7 @@ fn greet_newcomers(
     }
 }
 
+// here it is fine to process streams for each message, because the message will
 fn client_duty(
     client_rx: &mut mpsc::Receiver<whisper::Message>,
     config: &config::Config,
@@ -137,46 +138,38 @@ fn client_duty(
     enc_key: &[u8],
     iv: &[u8],
 ) {
-    let mut messages_to_store = Vec::<whisper::Message>::new();
-    let send_limit = config.max_send_peers;
-    while let Ok(client_msg) = client_rx.try_recv() {
-        let mut to_send =
-            Vec::<&mut (neighborhood::Node, Option<TcpStream>)>::with_capacity(send_limit);
-        let mut cnt = 0;
-        let connection_len = connections.len();
-        for i in connections.iter_mut() {
-            if let Some(_) = i.1 {
-                to_send.push(i);
-                cnt += 1;
-            }
-            if cnt >= send_limit {
+    let mut send_limit = config.max_send_peers;
+    let mut to_send = Vec::<u32>::with_capacity(connections.len());
+    {
+        let mut send_limit = send_limit;
+        for i in connections.iter() {
+            if send_limit == 0 {
                 break;
             }
+            if i.1.is_some() {
+                to_send.push(i.0.uuid);
+            }
+            send_limit -= 1;
         }
-        let mut aquaintance = Vec::<u32>::with_capacity(send_limit);
-        for i in to_send.iter() {
-            aquaintance.push(i.0.uuid);
+    }
+    for i in connections.iter_mut() {
+        if send_limit == 0 {
+            return;
         }
-        let need_duty_shift = aquaintance.len() < connection_len;
-        let msg = crate::whisper::Message::new(
-            crate::whisper::MessageType::Text,
-            &myself,
-            &client_msg.contents,
-            aquaintance,
-            match need_duty_shift {
-                true => to_send.last().unwrap().0.uuid,
-                false => 0,
-            },
-        );
-        let encrypted = msg.encrypt(&cipher, &enc_key, &iv).unwrap();
-        for i in to_send.iter_mut() {
-            if let Some(mut stream) = i.1.as_mut() {
-                speach::send_data(&mut stream, &encrypted);
+        if i.1.is_none() {
+            continue;
+        }
+        while let Ok(mut client_msg) = client_rx.try_recv() {
+            client_msg.aquaintance = to_send.clone();
+            client_msg.next_sender = *to_send.last().unwrap();
+            client_msg.sender = myself.clone();
+            let encrypted = client_msg.encrypt(&cipher, &enc_key, &iv).unwrap();
+            if speach::send_data(i.1.as_mut().unwrap(), &encrypted).is_err() {
+                send_limit += 1;
             }
         }
-        messages_to_store.push(msg);
+        send_limit -= 1;
     }
-    store_text_messages(&config, &messages_to_store);
 }
 
 // different in that people connect to us directly here instead of us receiving gossip
@@ -195,7 +188,11 @@ fn receive_newcomers(
                 "New connection from {}",
                 new_connection.peer_addr().unwrap()
             );
-            speach::send_data(&mut new_connection, announcement.to_string().as_bytes());
+            if speach::send_data(&mut new_connection, announcement.to_string().as_bytes()).is_err()
+            {
+                // failed to connect to this peer
+                continue;
+            }
             // possibly always true
             if !message.contents.contains("gossipless") {
                 // sender should ask about encryption now
@@ -212,6 +209,7 @@ fn receive_newcomers(
                     let pkey_temp = openssl::pkey::PKey::public_key_from_pem(public_key).unwrap();
                     let temp_encrypter = openssl::encrypt::Encrypter::new(&pkey_temp).unwrap();
                     if speach::authenticate(&encryption_request.sender, &mut new_connection) {
+                        // TODO: think about what to do when this fails
                         speach::send_encryption_data(
                             &mut new_connection,
                             &enc_key,
@@ -247,17 +245,16 @@ fn spread_gossip(
     cipher: &openssl::symm::Cipher,
     enc_key: &[u8],
     iv: &[u8],
-) -> Result<()> {
+) {
     let mut to_send = Vec::<u32>::with_capacity(connections.len());
     for i in connections.iter() {
         if i.1.is_some() {
             to_send.push(i.0.uuid);
         }
     }
-    // direct connections
     for i in connections.iter_mut() {
         if send_limit == 0 {
-            return Ok(());
+            return;
         }
         if i.1.is_none() {
             continue;
@@ -271,12 +268,12 @@ fn spread_gossip(
                 }
                 j.next_sender = *to_send.last().unwrap();
                 let encrypted = j.encrypt(&cipher, &enc_key, &iv).unwrap();
+                // TODO: ask someone else to deliver this message if this fails
                 speach::send_data(i.1.as_mut().unwrap(), &encrypted);
             }
         }
         send_limit -= 1;
     }
-    Ok(())
 }
 
 fn get_stored_messages(config: &config::Config) -> Result<Vec<whisper::Message>> {
@@ -421,8 +418,8 @@ pub fn spawn_server(
         true => {
             let mut iv = vec![0u8; cipher.iv_len().unwrap()];
             let mut key = vec![0u8; cipher.key_len()];
-            openssl::rand::rand_bytes(&mut key);
-            openssl::rand::rand_bytes(&mut iv);
+            openssl::rand::rand_bytes(&mut key).expect("Unable to set up main key");
+            openssl::rand::rand_bytes(&mut iv).expect("Unable to set up iv");
             (key, iv)
         }
         false => speach::get_key_and_iv(

@@ -27,10 +27,10 @@ impl Node {
         match parse_try {
             Err(parse_error) => Err(parse_error),
             Ok(mut json_tree) => Ok(Node {
+                // TODO: this is obviously very bug prone and needs error handling instead of unwrapping
                 name: json_tree["name"].take_string().unwrap(),
-                uuid: match std::convert::TryFrom::try_from(
-                    json_tree["uuid"].as_number().unwrap(),
-                ) {
+                uuid: match std::convert::TryFrom::try_from(json_tree["uuid"].as_number().unwrap())
+                {
                     Ok(num) => num,
                     _ => 0,
                 },
