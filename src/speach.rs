@@ -4,22 +4,6 @@ use openssl::symm::*;
 use std::io::prelude::*;
 use std::net::{SocketAddr, TcpStream};
 
-pub fn receive_messages(stream: &mut TcpStream) -> Vec<crate::whisper::Message> {
-    let mut messages = Vec::<crate::whisper::Message>::new();
-    let mut buffer_size = [0u8; 8];
-    while let Ok(_) = stream.read_exact(&mut buffer_size) {
-        let buffer_size = u64::from_be_bytes(buffer_size);
-        let mut buffer = vec![0u8; buffer_size as usize];
-        let _ = stream.read_exact(&mut buffer);
-        if let Ok(packet) = std::str::from_utf8(&buffer) {
-            if let Ok(msg) = crate::whisper::Message::from_str(packet) {
-                messages.push(msg);
-            }
-        }
-    }
-    messages
-}
-
 pub fn receive_messages_enc(
     stream: &mut TcpStream,
     cipher: &Cipher,
