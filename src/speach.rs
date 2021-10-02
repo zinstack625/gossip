@@ -63,7 +63,7 @@ pub fn send_data(stream: &mut TcpStream, data: &[u8]) -> std::io::Result<usize> 
 pub fn init_connection(
     address: &SocketAddr,
     announcement: &crate::whisper::Message,
-) -> Result<(crate::neighborhood::Node, Option<TcpStream>), std::io::Error> {
+) -> Result<crate::neighborhood::Node, std::io::Error> {
     let mut stream = TcpStream::connect(address)?;
     stream.set_nonblocking(false)?;
     send_data(&mut stream, announcement.to_string().as_bytes())?;
@@ -71,7 +71,12 @@ pub fn init_connection(
         stream
             .set_nonblocking(true)
             .expect("Unable to set TCP stream async");
-        Ok((reply.sender, Some(stream)))
+
+        Ok(crate::neighborhood::Node::new(
+            reply.sender.name,
+            reply.sender.uuid,
+            Some(stream),
+        ))
     } else {
         Err(std::io::Error::new(
             std::io::ErrorKind::ConnectionRefused,
@@ -83,9 +88,8 @@ pub fn init_connection(
 pub fn initial_connections(
     init_nodes: Vec<SocketAddr>,
     announcement: &crate::whisper::Message,
-) -> Vec<(crate::neighborhood::Node, Option<TcpStream>)> {
-    let mut connections = Vec::<(crate::neighborhood::Node, Option<TcpStream>)>::new();
-    connections.reserve(init_nodes.len());
+) -> Vec<crate::neighborhood::Node> {
+    let mut connections = Vec::<crate::neighborhood::Node>::with_capacity(init_nodes.len());
     for i in init_nodes {
         if let Ok(node) = init_connection(&i, &announcement) {
             connections.push(node);
@@ -95,7 +99,7 @@ pub fn initial_connections(
 }
 
 pub fn get_key_and_iv(
-    peer: &mut (crate::neighborhood::Node, Option<TcpStream>),
+    peer: &mut crate::neighborhood::Node,
     myself: &crate::neighborhood::Node,
 ) -> Result<(Vec<u8>, Vec<u8>), std::io::Error> {
     let temporary_rsa = Rsa::generate(2048).unwrap();
@@ -108,7 +112,7 @@ pub fn get_key_and_iv(
     );
     let pkey = openssl::pkey::PKey::from_rsa(temporary_rsa).unwrap();
     let decrypter = Decrypter::new(&pkey).unwrap();
-    if let Some(stream) = peer.1.as_mut() {
+    if let Some(stream) = peer.stream.as_mut() {
         send_data(stream, request.to_string().as_bytes())?;
         let key = get_encryption_data(stream, &decrypter).unwrap_or_default();
         let iv = get_encryption_data(stream, &decrypter).unwrap_or_default();

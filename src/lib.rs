@@ -18,8 +18,7 @@ struct State {
     cipher: openssl::symm::Cipher,
     myself: neighborhood::Node,
     announcement: whisper::Message,
-    // the node should probably contain it's stream, that'll be nice
-    connections: Vec<(neighborhood::Node, Option<TcpStream>)>,
+    connections: Vec<neighborhood::Node>,
     enc_key: Vec<u8>,
     iv: Vec<u8>, // this needs to go
     config: Arc<Mutex<config::Config>>,
@@ -53,7 +52,7 @@ fn spawn_listener(port: u16) -> (mpsc::Receiver<TcpStream>, SocketAddr) {
 fn recv_messages(ctx: &mut State) -> Vec<whisper::Message> {
     let mut mailbox = Vec::<whisper::Message>::new();
     for i in ctx.connections.iter_mut() {
-        if let Some(stream) = i.1.as_mut() {
+        if let Some(stream) = i.stream.as_mut() {
             let connection_messages =
                 speach::receive_messages_enc(stream, &ctx.cipher, &ctx.enc_key, &ctx.iv);
             mailbox.extend(connection_messages);
@@ -94,10 +93,10 @@ fn greet_newcomers(ctx: &mut State, newcomer_mailbox: Vec<whisper::Message>) {
         let newcomer = i.sender.clone();
         let mut announcement = ctx.announcement.clone();
         announcement.contents = String::from("gossipless");
-        println!("Was told to connect to {}", newcomer.address);
+        println!("Was told to connect to {}", newcomer.address.to_string());
         let mut greeted = false;
         for i in ctx.connections.iter() {
-            if i.0.uuid == newcomer.uuid {
+            if i.uuid == newcomer.uuid {
                 greeted = true;
                 break;
             }
@@ -110,7 +109,7 @@ fn greet_newcomers(ctx: &mut State, newcomer_mailbox: Vec<whisper::Message>) {
             ctx.connections.push(node);
         } else {
             // still aknowledge peer's existence
-            ctx.connections.push((newcomer, None));
+            ctx.connections.push(newcomer);
         }
     }
 }
@@ -123,8 +122,8 @@ fn client_duty(ctx: &mut State) {
         if send_limit == 0 {
             break;
         }
-        if i.1.is_some() {
-            to_send.push(i.0.uuid);
+        if i.stream.is_some() {
+            to_send.push(i.uuid);
         }
         send_limit -= 1;
     }
@@ -142,7 +141,7 @@ fn client_duty(ctx: &mut State) {
     for i in ctx.connections.iter_mut() {
         for j in client_msgs.iter() {
             let encrypted = j.encrypt(&ctx.cipher, &ctx.enc_key, &ctx.iv).unwrap();
-            speach::send_data(i.1.as_mut().unwrap(), &encrypted);
+            speach::send_data(i.stream.as_mut().unwrap(), &encrypted);
         }
     }
 }
@@ -201,8 +200,11 @@ fn receive_newcomers(ctx: &mut State) -> Vec<whisper::Message> {
                 message.aquaintance.push(ctx.myself.uuid);
                 newcomer_mailbox.push(message.clone());
             }
-            ctx.connections
-                .push((message.sender.clone(), Some(new_connection)));
+            ctx.connections.push(neighborhood::Node::new(
+                message.sender.name,
+                message.sender.uuid,
+                Some(new_connection),
+            ));
         }
     }
     newcomer_mailbox
@@ -211,8 +213,8 @@ fn receive_newcomers(ctx: &mut State) -> Vec<whisper::Message> {
 fn spread_gossip(ctx: &mut State, mailbox: Vec<whisper::Message>) {
     let mut to_send = Vec::<u32>::with_capacity(ctx.connections.len());
     for i in ctx.connections.iter() {
-        if i.1.is_some() {
-            to_send.push(i.0.uuid);
+        if i.stream.is_some() {
+            to_send.push(i.uuid);
         }
     }
     // mutex should be dropped right away, as there's no name assigned to mutex handler,
@@ -223,12 +225,12 @@ fn spread_gossip(ctx: &mut State, mailbox: Vec<whisper::Message>) {
         if send_limit == 0 {
             return;
         }
-        if i.1.is_none() {
+        if i.stream.is_none() {
             continue;
         }
         // it is essential to send each and every message here if possible, otherwise data will be lost in the network
         for mut j in mailbox.clone() {
-            if !j.aquaintance.contains(&i.0.uuid) {
+            if !j.aquaintance.contains(&i.uuid) {
                 // have to let the receiver know who's seen the message already
                 for k in to_send.iter() {
                     j.aquaintance.push(*k);
@@ -237,7 +239,7 @@ fn spread_gossip(ctx: &mut State, mailbox: Vec<whisper::Message>) {
                 // every time iv is pulled out of context, a kitten dies
                 let encrypted = j.encrypt(&ctx.cipher, &ctx.enc_key, &ctx.iv).unwrap();
                 // TODO: ask someone else to deliver this message if this fails
-                speach::send_data(i.1.as_mut().unwrap(), &encrypted);
+                speach::send_data(i.stream.as_mut().unwrap(), &encrypted);
             }
         }
         send_limit -= 1;
@@ -329,7 +331,7 @@ pub fn spawn_server(
     let uuid: u32 = rand::thread_rng().gen();
     println!("I am {}", uuid);
     let cipher = openssl::symm::Cipher::aes_256_gcm();
-    let myself = neighborhood::Node::new(&client_name, uuid, &local_address);
+    let myself = neighborhood::Node::with_address(client_name.clone(), uuid, local_address.clone());
     let announcement = whisper::Message::new(
         whisper::MessageType::NewMember,
         &myself,

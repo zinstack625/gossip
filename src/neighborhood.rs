@@ -1,8 +1,30 @@
-#[derive(Clone)]
+use std::net::{SocketAddr, TcpStream};
+
 pub struct Node {
     pub name: String,
     pub uuid: u32,
-    pub address: std::net::SocketAddr,
+    pub stream: Option<TcpStream>,
+    pub address: SocketAddr,
+}
+
+impl Clone for Node {
+    fn clone(&self) -> Self {
+        Self {
+            name: self.name.clone(),
+            uuid: self.uuid.clone(),
+            stream: match &self.stream {
+                Some(stream) => {
+                    if let Ok(copy) = stream.try_clone() {
+                        Some(copy)
+                    } else {
+                        None
+                    }
+                }
+                None => None,
+            },
+            address: self.address.clone(),
+        }
+    }
 }
 impl PartialEq for Node {
     fn eq(&self, other: &Node) -> bool {
@@ -12,13 +34,10 @@ impl PartialEq for Node {
 impl Eq for Node {}
 impl Node {
     pub fn to_string(&self) -> String {
-        let mut address_string = self.address.ip().to_string();
-        address_string.push(':');
-        address_string.push_str(self.address.port().to_string().as_str());
         let node = json::object! {
             name: self.name.clone(),
             uuid: self.uuid,
-            address: address_string,
+            address: self.address.to_string(),
         };
         json::stringify(node)
     }
@@ -34,15 +53,28 @@ impl Node {
                     Ok(num) => num,
                     _ => 0,
                 },
+                stream: None,
                 address: json_tree["address"].take_string().unwrap().parse().unwrap(),
             }),
         }
     }
-    pub fn new(name: &String, uuid: u32, address: &std::net::SocketAddr) -> Node {
+    pub fn with_address(name: String, uuid: u32, address: SocketAddr) -> Node {
         Node {
-            name: name.clone(),
+            name,
             uuid,
-            address: address.clone(),
+            stream: None,
+            address,
+        }
+    }
+    pub fn new(name: String, uuid: u32, stream: Option<TcpStream>) -> Node {
+        Node {
+            name,
+            uuid,
+            address: match &stream {
+                Some(stream) => stream.peer_addr().unwrap(),
+                None => "0.0.0.0:0".parse().unwrap(),
+            },
+            stream,
         }
     }
 }
