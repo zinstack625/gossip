@@ -13,6 +13,7 @@ pub struct Message {
     pub contents: String,
     pub aquaintance: Vec<u32>,
     pub next_sender: u32,
+    pub next_iv: Vec<u8>,
 }
 impl Message {
     pub fn new(
@@ -21,6 +22,7 @@ impl Message {
         contents: &String,
         aquaintance: Vec<u32>,
         next_sender: u32,
+        next_iv: &[u8],
     ) -> Message {
         Message {
             msgtype,
@@ -28,6 +30,7 @@ impl Message {
             contents: contents.clone(),
             aquaintance,
             next_sender,
+            next_iv: next_iv.to_vec(),
         }
     }
     pub fn format(&self) -> String {
@@ -48,6 +51,7 @@ impl Message {
             contents: self.contents.clone(),
             aquaintance: self.aquaintance.clone(),
             next_sender: self.next_sender,
+            next_iv: self.next_iv.clone(),
         };
         json::stringify(message)
     }
@@ -68,19 +72,32 @@ impl Message {
                     .unwrap(),
                     contents: json_node["contents"].take_string().unwrap(),
                     aquaintance: {
-                        let mut aquaintance_vec = Vec::<u32>::with_capacity(json_node["aquaintance"].len());
+                        let mut aquaintance_vec =
+                            Vec::<u32>::with_capacity(json_node["aquaintance"].len());
                         for i in json_node["aquaintance"].members() {
                             aquaintance_vec.push(i.as_u32().unwrap_or_default());
                         }
                         aquaintance_vec
                     },
                     next_sender: json_node["next_sender"].as_u32().unwrap_or_default(),
+                    next_iv: {
+                        let mut iv = Vec::<u8>::with_capacity(json_node["next_iv"].len());
+                        json_node["next_iv"].members().enumerate().for_each(|i| {
+                            iv.push(i.1.as_u8().unwrap_or_default());
+                        });
+                        iv
+                    },
                 };
                 Ok(parsed_msg)
             }
         }
     }
-    pub fn encrypt(&self, cipher: &Cipher, key: &[u8], iv: &[u8]) -> Result<Vec<u8>, openssl::error::ErrorStack> {
+    pub fn encrypt(
+        &self,
+        cipher: &Cipher,
+        key: &[u8],
+        iv: &[u8],
+    ) -> Result<Vec<u8>, openssl::error::ErrorStack> {
         let bytes = self.to_string().as_bytes().to_vec();
         let buffer_len = bytes.len() + cipher.block_size();
         let mut encrypter = Crypter::new(*cipher, Mode::Encrypt, key, Some(iv))?;

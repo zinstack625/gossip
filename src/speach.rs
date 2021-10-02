@@ -4,19 +4,23 @@ use openssl::symm::*;
 use std::io::prelude::*;
 use std::net::{SocketAddr, TcpStream};
 
+use crate::neighborhood;
+
 pub fn receive_messages_enc(
-    stream: &mut TcpStream,
+    node: &mut neighborhood::Node,
     cipher: &Cipher,
     key: &[u8],
-    iv: &[u8],
 ) -> Vec<crate::whisper::Message> {
     let mut messages = Vec::<crate::whisper::Message>::new();
+    if node.stream.is_none() {
+        return messages;
+    }
     let mut buffer_size = [0u8; 8];
-    while let Ok(_) = stream.read_exact(&mut buffer_size) {
+    while let Ok(_) = node.stream.as_mut().unwrap().read_exact(&mut buffer_size) {
         let buffer_size = u64::from_be_bytes(buffer_size);
         let mut buffer = vec![0u8; buffer_size as usize];
-        let _ = stream.read_exact(&mut buffer);
-        let decrypt = Crypter::new(*cipher, Mode::Decrypt, key, Some(iv));
+        let _ = node.stream.as_mut().unwrap().read_exact(&mut buffer);
+        let decrypt = Crypter::new(*cipher, Mode::Decrypt, key, Some(&node.iv));
         if decrypt.is_err() {
             return messages;
         } else {
@@ -27,6 +31,7 @@ pub fn receive_messages_enc(
             decrypted.truncate(count);
             if let Ok(packet) = std::str::from_utf8(&decrypted) {
                 if let Ok(msg) = crate::whisper::Message::from_str(packet) {
+                    node.iv = msg.next_iv.clone();
                     messages.push(msg);
                 }
             }
@@ -98,10 +103,10 @@ pub fn initial_connections(
     connections
 }
 
-pub fn get_key_and_iv(
+pub fn get_key(
     peer: &mut crate::neighborhood::Node,
     myself: &crate::neighborhood::Node,
-) -> Result<(Vec<u8>, Vec<u8>), std::io::Error> {
+) -> Result<Vec<u8>, std::io::Error> {
     let temporary_rsa = Rsa::generate(2048).unwrap();
     let request = crate::whisper::Message::new(
         crate::whisper::MessageType::EncryptionRequest,
@@ -109,14 +114,15 @@ pub fn get_key_and_iv(
         &String::from_utf8(temporary_rsa.public_key_to_pem().unwrap()).unwrap(),
         Vec::<u32>::new(),
         0,
+        &vec![0; 12],
     );
     let pkey = openssl::pkey::PKey::from_rsa(temporary_rsa).unwrap();
     let decrypter = Decrypter::new(&pkey).unwrap();
     if let Some(stream) = peer.stream.as_mut() {
         send_data(stream, request.to_string().as_bytes())?;
         let key = get_encryption_data(stream, &decrypter).unwrap_or_default();
-        let iv = get_encryption_data(stream, &decrypter).unwrap_or_default();
-        Ok((key, iv))
+        peer.iv = get_encryption_data(stream, &decrypter).unwrap_or_default();
+        Ok(key)
     } else {
         panic!("Tried to get keys from unestablished connection!");
     }

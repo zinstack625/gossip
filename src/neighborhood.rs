@@ -5,6 +5,7 @@ pub struct Node {
     pub uuid: u32,
     pub stream: Option<TcpStream>,
     pub address: SocketAddr,
+    pub iv: Vec<u8>,
 }
 
 impl Clone for Node {
@@ -23,6 +24,10 @@ impl Clone for Node {
                 None => None,
             },
             address: self.address.clone(),
+            iv: match &self.stream {
+                Some(_) => self.iv.clone(),
+                None => vec![0; 12],
+            },
         }
     }
 }
@@ -55,6 +60,7 @@ impl Node {
                 },
                 stream: None,
                 address: json_tree["address"].take_string().unwrap().parse().unwrap(),
+                iv: vec![0; 12],
             }),
         }
     }
@@ -64,6 +70,7 @@ impl Node {
             uuid,
             stream: None,
             address,
+            iv: vec![0; 12],
         }
     }
     pub fn new(name: String, uuid: u32, stream: Option<TcpStream>) -> Node {
@@ -75,6 +82,7 @@ impl Node {
                 None => "0.0.0.0:0".parse().unwrap(),
             },
             stream,
+            iv: vec![0; 12],
         }
     }
 }

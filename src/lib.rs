@@ -20,7 +20,6 @@ struct State {
     announcement: whisper::Message,
     connections: Vec<neighborhood::Node>,
     enc_key: Vec<u8>,
-    iv: Vec<u8>, // this needs to go
     config: Arc<Mutex<config::Config>>,
     conf_change_sig_rx: mpsc::Receiver<usize>,
     tx: mpsc::Sender<whisper::Message>,
@@ -52,9 +51,8 @@ fn spawn_listener(port: u16) -> (mpsc::Receiver<TcpStream>, SocketAddr) {
 fn recv_messages(ctx: &mut State) -> Vec<whisper::Message> {
     let mut mailbox = Vec::<whisper::Message>::new();
     for i in ctx.connections.iter_mut() {
-        if let Some(stream) = i.stream.as_mut() {
-            let connection_messages =
-                speach::receive_messages_enc(stream, &ctx.cipher, &ctx.enc_key, &ctx.iv);
+        if i.stream.is_some() {
+            let connection_messages = speach::receive_messages_enc(i, &ctx.cipher, &ctx.enc_key);
             mailbox.extend(connection_messages);
         }
     }
@@ -63,11 +61,11 @@ fn recv_messages(ctx: &mut State) -> Vec<whisper::Message> {
 
 fn process_messages(
     ctx: &mut State,
-    mailbox: /* maybe remove this mut */ &mut Vec<whisper::Message>,
+    mailbox: Vec<whisper::Message>,
     gossip: &mut Vec<whisper::Message>,
     newcomer_mailbox: &mut Vec<whisper::Message>,
 ) {
-    for i in mailbox.iter_mut() {
+    for i in mailbox {
         match i.msgtype {
             whisper::MessageType::Text => {
                 // send the message to a client (in debug form for now)
@@ -77,8 +75,9 @@ fn process_messages(
             }
             // something about this doesn't seem right
             whisper::MessageType::NewMember => {
-                i.aquaintance.push(ctx.myself.uuid);
-                newcomer_mailbox.push(i.clone());
+                let mut msg = i.clone();
+                msg.aquaintance.push(ctx.myself.uuid);
+                newcomer_mailbox.push(msg);
             }
             whisper::MessageType::EncryptionRequest => {} // cannot happen, as those can only be unencrypted
         }
@@ -139,8 +138,10 @@ fn client_duty(ctx: &mut State) {
     }
 
     for i in ctx.connections.iter_mut() {
-        for j in client_msgs.iter() {
-            let encrypted = j.encrypt(&ctx.cipher, &ctx.enc_key, &ctx.iv).unwrap();
+        for j in client_msgs.iter_mut() {
+            openssl::rand::rand_bytes(&mut j.next_iv);
+            let encrypted = j.encrypt(&ctx.cipher, &ctx.enc_key, &i.iv).unwrap();
+            i.iv = j.next_iv.clone();
             speach::send_data(i.stream.as_mut().unwrap(), &encrypted);
         }
     }
@@ -184,7 +185,14 @@ fn receive_newcomers(ctx: &mut State) -> Vec<whisper::Message> {
                             &temp_encrypter,
                         );
                         // ugly
-                        speach::send_encryption_data(&mut new_connection, &ctx.iv, &temp_encrypter);
+                        speach::send_encryption_data(
+                            &mut new_connection,
+                            &ctx.myself.iv,
+                            &temp_encrypter,
+                        );
+                    } else {
+                        // TODO: report invalid auth data
+                        continue;
                     }
                 }
             } else {
@@ -200,17 +208,19 @@ fn receive_newcomers(ctx: &mut State) -> Vec<whisper::Message> {
                 message.aquaintance.push(ctx.myself.uuid);
                 newcomer_mailbox.push(message.clone());
             }
-            ctx.connections.push(neighborhood::Node::new(
+            let mut new_node = neighborhood::Node::new(
                 message.sender.name,
                 message.sender.uuid,
                 Some(new_connection),
-            ));
+            );
+            new_node.iv = ctx.myself.iv.clone();
+            ctx.connections.push(new_node);
         }
     }
     newcomer_mailbox
 }
 
-fn spread_gossip(ctx: &mut State, mailbox: Vec<whisper::Message>) {
+fn spread_gossip(ctx: &mut State, mut mailbox: Vec<whisper::Message>) {
     let mut to_send = Vec::<u32>::with_capacity(ctx.connections.len());
     for i in ctx.connections.iter() {
         if i.stream.is_some() {
@@ -220,7 +230,6 @@ fn spread_gossip(ctx: &mut State, mailbox: Vec<whisper::Message>) {
     // mutex should be dropped right away, as there's no name assigned to mutex handler,
     // meaning it'll get dropped right away
     let mut send_limit = ctx.config.try_lock().unwrap().max_send_peers;
-    // it's better to modify the mailbox right here
     for i in ctx.connections.iter_mut() {
         if send_limit == 0 {
             return;
@@ -236,8 +245,9 @@ fn spread_gossip(ctx: &mut State, mailbox: Vec<whisper::Message>) {
                     j.aquaintance.push(*k);
                 }
                 j.next_sender = *to_send.last().unwrap();
-                // every time iv is pulled out of context, a kitten dies
-                let encrypted = j.encrypt(&ctx.cipher, &ctx.enc_key, &ctx.iv).unwrap();
+                openssl::rand::rand_bytes(&mut j.next_iv);
+                let encrypted = j.encrypt(&ctx.cipher, &ctx.enc_key, &i.iv).unwrap();
+                i.iv = j.next_iv.clone();
                 // TODO: ask someone else to deliver this message if this fails
                 speach::send_data(i.stream.as_mut().unwrap(), &encrypted);
             }
@@ -266,7 +276,7 @@ fn store_text_messages(ctx: &mut State, messages: &Vec<whisper::Message>) -> Res
         .write(true)
         .create(true)
         .append(true)
-        .open(&ctx.config.try_lock().unwrap().stored_messages_filename)?;
+        .open(&ctx.config.lock().unwrap().stored_messages_filename)?;
     let mut msg_database = BufWriter::new(file);
     for i in messages.iter() {
         if i.msgtype == whisper::MessageType::Text {
@@ -281,18 +291,14 @@ fn store_text_messages(ctx: &mut State, messages: &Vec<whisper::Message>) -> Res
 fn server_thread(mut state: State) {
     let mut postponed_storage = Vec::<whisper::Message>::new();
     loop {
-        let mut mailbox = recv_messages(&mut state);
+        let mailbox = recv_messages(&mut state);
         if let Err(_) = store_text_messages(&mut state, &mailbox) {
             postponed_storage.extend_from_slice(&mailbox[..]);
         }
         let mut gossip = Vec::<whisper::Message>::new();
         let mut newcomer_mailbox = Vec::<whisper::Message>::new();
-        process_messages(&mut state, &mut mailbox, &mut gossip, &mut newcomer_mailbox);
+        process_messages(&mut state, mailbox, &mut gossip, &mut newcomer_mailbox);
         greet_newcomers(&mut state, newcomer_mailbox);
-        let send_limit = {
-            let config = state.config.lock().unwrap();
-            config.max_send_peers
-        };
         // input from client
         client_duty(&mut state);
         // direct connections
@@ -331,24 +337,26 @@ pub fn spawn_server(
     let uuid: u32 = rand::thread_rng().gen();
     println!("I am {}", uuid);
     let cipher = openssl::symm::Cipher::aes_256_gcm();
-    let myself = neighborhood::Node::with_address(client_name.clone(), uuid, local_address.clone());
+    let mut myself =
+        neighborhood::Node::with_address(client_name.clone(), uuid, local_address.clone());
     let announcement = whisper::Message::new(
         whisper::MessageType::NewMember,
         &myself,
         &String::from(""),
         vec![uuid],
         0,
+        &vec![0; 12],
     );
     let mut connections = speach::initial_connections(init_nodes, &announcement);
-    let (enc_key, iv) = match connections.is_empty() {
+    let enc_key = match connections.is_empty() {
         true => {
-            let mut iv = vec![0u8; cipher.iv_len().unwrap()];
+            myself.iv.resize(cipher.iv_len().unwrap_or_default(), 0);
             let mut key = vec![0u8; cipher.key_len()];
             openssl::rand::rand_bytes(&mut key).expect("Unable to set up main key");
-            openssl::rand::rand_bytes(&mut iv).expect("Unable to set up iv");
-            (key, iv)
+            openssl::rand::rand_bytes(&mut myself.iv).expect("Unable to set up iv");
+            key
         }
-        false => speach::get_key_and_iv(
+        false => speach::get_key(
             connections.choose_mut(&mut rand::thread_rng()).unwrap(),
             &myself,
         )
@@ -373,7 +381,6 @@ pub fn spawn_server(
         announcement,
         connections,
         enc_key,
-        iv,
         config,
         conf_change_sig_rx,
         tx,
