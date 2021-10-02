@@ -138,10 +138,9 @@ fn client_duty(
     enc_key: &[u8],
     iv: &[u8],
 ) {
-    let mut send_limit = config.max_send_peers;
     let mut to_send = Vec::<u32>::with_capacity(connections.len());
     {
-        let mut send_limit = send_limit;
+        let mut send_limit = config.max_send_peers;
         for i in connections.iter() {
             if send_limit == 0 {
                 break;
@@ -152,23 +151,22 @@ fn client_duty(
             send_limit -= 1;
         }
     }
+    let mut client_msgs = Vec::<whisper::Message>::new();
+    while let Ok(mut client_msg) = client_rx.try_recv() {
+        client_msg.aquaintance = to_send.clone();
+        client_msg.next_sender = match to_send.len() < config.max_send_peers {
+            true => *to_send.last().unwrap(),
+            false => 0,
+        };
+        client_msg.sender = myself.clone();
+        client_msgs.push(client_msg);
+    }
+
     for i in connections.iter_mut() {
-        if send_limit == 0 {
-            return;
+        for j in client_msgs.iter() {
+            let encrypted = j.encrypt(&cipher, &enc_key, &iv).unwrap();
+            speach::send_data(i.1.as_mut().unwrap(), &encrypted);
         }
-        if i.1.is_none() {
-            continue;
-        }
-        while let Ok(mut client_msg) = client_rx.try_recv() {
-            client_msg.aquaintance = to_send.clone();
-            client_msg.next_sender = *to_send.last().unwrap();
-            client_msg.sender = myself.clone();
-            let encrypted = client_msg.encrypt(&cipher, &enc_key, &iv).unwrap();
-            if speach::send_data(i.1.as_mut().unwrap(), &encrypted).is_err() {
-                send_limit += 1;
-            }
-        }
-        send_limit -= 1;
     }
 }
 
