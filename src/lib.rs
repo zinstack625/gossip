@@ -118,10 +118,7 @@ fn greet_newcomers(ctx: &mut State, newcomer_mailbox: Vec<whisper::Message>) {
 // here it is fine to process streams for each message, because the message will
 fn client_duty(ctx: &mut State) {
     let mut to_send = Vec::<u32>::with_capacity(ctx.connections.len());
-    let mut send_limit: usize;
-    {
-        send_limit = ctx.config.try_lock().unwrap().max_send_peers;
-    }
+    let mut send_limit = ctx.config.try_lock().unwrap().max_send_peers;
     for i in ctx.connections.iter() {
         if send_limit == 0 {
             break;
