@@ -220,7 +220,7 @@ fn receive_newcomers(ctx: &mut State) -> Vec<whisper::Message> {
     newcomer_mailbox
 }
 
-fn spread_gossip(ctx: &mut State, mut mailbox: Vec<whisper::Message>) {
+fn spread_gossip(ctx: &mut State, mailbox: Vec<whisper::Message>) {
     let mut to_send = Vec::<u32>::with_capacity(ctx.connections.len());
     for i in ctx.connections.iter() {
         if i.stream.is_some() {
@@ -346,6 +346,7 @@ pub fn spawn_server(
         vec![uuid],
         0,
         &vec![0; 12],
+        std::time::SystemTime::now(),
     );
     let mut connections = speach::initial_connections(init_nodes, &announcement);
     let enc_key = match connections.is_empty() {

@@ -1,4 +1,5 @@
 use openssl::symm::*;
+use std::time::{Duration, UNIX_EPOCH};
 
 #[derive(Copy, Clone, PartialEq)]
 pub enum MessageType {
@@ -14,6 +15,7 @@ pub struct Message {
     pub aquaintance: Vec<u32>,
     pub next_sender: u32,
     pub next_iv: Vec<u8>,
+    pub timestamp: std::time::SystemTime,
 }
 impl Message {
     pub fn new(
@@ -23,6 +25,7 @@ impl Message {
         aquaintance: Vec<u32>,
         next_sender: u32,
         next_iv: &[u8],
+        timestamp: std::time::SystemTime,
     ) -> Message {
         Message {
             msgtype,
@@ -31,11 +34,22 @@ impl Message {
             aquaintance,
             next_sender,
             next_iv: next_iv.to_vec(),
+            timestamp,
         }
     }
     pub fn format(&self) -> String {
         let mut formatted_message = String::new();
         formatted_message.push_str(self.sender.to_string().as_str());
+        formatted_message.push_str(" :: ");
+        formatted_message.push_str(
+            &self
+                .timestamp
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs()
+                .to_string(),
+        );
+        formatted_message.push_str(" secs :: ");
         formatted_message.push_str(": ");
         formatted_message.push_str(self.contents.as_str());
         formatted_message
@@ -52,6 +66,7 @@ impl Message {
             aquaintance: self.aquaintance.clone(),
             next_sender: self.next_sender,
             next_iv: self.next_iv.clone(),
+            timestamp: self.timestamp.duration_since(UNIX_EPOCH).unwrap_or_default().as_secs(),
         };
         json::stringify(message)
     }
@@ -87,6 +102,8 @@ impl Message {
                         });
                         iv
                     },
+                    timestamp: UNIX_EPOCH
+                        + Duration::from_secs(json_node["timestamp"].as_u64().unwrap_or_default()),
                 };
                 Ok(parsed_msg)
             }

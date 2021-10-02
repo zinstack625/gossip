@@ -115,6 +115,7 @@ pub fn get_key(
         Vec::<u32>::new(),
         0,
         &vec![0; 12],
+        std::time::SystemTime::now(),
     );
     let pkey = openssl::pkey::PKey::from_rsa(temporary_rsa).unwrap();
     let decrypter = Decrypter::new(&pkey).unwrap();
