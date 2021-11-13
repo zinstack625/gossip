@@ -5,7 +5,7 @@ use std::io::prelude::*;
 use std::io::Result;
 use std::io::{BufReader, BufWriter};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, TcpStream};
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::{mpsc, Arc, Mutex, LockResult};
 use std::thread;
 
 pub mod config;
@@ -257,33 +257,52 @@ fn spread_gossip(ctx: &mut State, mailbox: Vec<whisper::Message>) {
 }
 
 fn get_stored_messages(ctx: &mut State) -> Result<Vec<whisper::Message>> {
-    let file = File::open(&ctx.config.try_lock().unwrap().stored_messages_filename)?;
-    let msg_database = BufReader::new(file);
-    let mut stored_messages = Vec::<whisper::Message>::new();
-    for i in msg_database.lines() {
-        if let Ok(line) = i {
-            if let Ok(message) = whisper::Message::from_str(line.as_str()) {
-                stored_messages.push(message);
+    let db = sled::open(match ctx.config.lock() {
+        Ok(cfg) => cfg.stored_messages_filename.clone(),
+        _ => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "db poisoned",
+            ))
+        }
+    })
+    .expect("Unable to open messages db");
+    let mut recvd_msgs = Vec::<whisper::Message>::new();
+    for i in db.iter() {
+        if i.is_err() {
+            continue;
+        }
+        let i = i.unwrap();
+        if let Ok(string) = std::str::from_utf8(&i.1) {
+            if let Ok(msg) = whisper::Message::from_str(string) {
+                recvd_msgs.push(msg);
             }
         }
     }
-    Ok(stored_messages)
+    Ok(recvd_msgs)
 }
 
 fn store_text_messages(ctx: &mut State, messages: &Vec<whisper::Message>) -> Result<()> {
-    let file = std::fs::OpenOptions::new()
-        .read(false)
-        .write(true)
-        .create(true)
-        .append(true)
-        .open(&ctx.config.lock().unwrap().stored_messages_filename)?;
-    let mut msg_database = BufWriter::new(file);
-    for i in messages.iter() {
-        if i.msgtype == whisper::MessageType::Text {
-            let mut modified_message = i.to_string();
-            modified_message.push('\n');
-            msg_database.write(modified_message.as_bytes())?;
+    let db = sled::open(match ctx.config.lock() {
+        Ok(cfg) => cfg.stored_messages_filename.clone(),
+        _ => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "db poisoned",
+            ))
         }
+    })
+    // maybe don't crash here?
+    .expect("Unable to open messages db");
+    for i in messages {
+        db.insert(
+            i.timestamp
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis()
+                .to_ne_bytes(),
+            i.to_string().as_bytes(),
+        );
     }
     Ok(())
 }
@@ -292,6 +311,7 @@ fn server_thread(mut state: State) {
     let mut postponed_storage = Vec::<whisper::Message>::new();
     loop {
         let mailbox = recv_messages(&mut state);
+        // TODO store stuff from postponed
         if let Err(_) = store_text_messages(&mut state, &mailbox) {
             postponed_storage.extend_from_slice(&mailbox[..]);
         }
