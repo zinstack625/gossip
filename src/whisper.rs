@@ -6,6 +6,7 @@ pub enum MessageType {
     Text,
     NewMember,
     EncryptionRequest,
+    MissedMessagesRequest,
 }
 #[derive(Clone)]
 pub struct Message {
@@ -60,6 +61,7 @@ impl Message {
                 MessageType::NewMember => "NewMember",
                 MessageType::Text => "Text",
                 MessageType::EncryptionRequest => "EncryptionRequest",
+                MessageType::MissedMessagesRequest => "MissedMessagesRequest",
             },
             sender: self.sender.to_string(),
             contents: self.contents.clone(),
@@ -79,6 +81,7 @@ impl Message {
                     msgtype: match json_node["msgtype"].take_string().unwrap().as_str() {
                         "NewMember" => MessageType::NewMember,
                         "EncryptionRequest" => MessageType::EncryptionRequest,
+                        "MissedMessagesRequest" => MessageType::MissedMessagesRequest,
                         _ => MessageType::Text,
                     },
                     sender: crate::neighborhood::Node::from_str(

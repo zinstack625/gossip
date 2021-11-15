@@ -5,7 +5,7 @@ use std::io::prelude::*;
 use std::io::Result;
 use std::io::{BufReader, BufWriter};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, TcpStream};
-use std::sync::{mpsc, Arc, Mutex, LockResult};
+use std::sync::{mpsc, Arc, LockResult, Mutex};
 use std::thread;
 
 pub mod config;
@@ -78,6 +78,41 @@ fn process_messages(
                 let mut msg = i.clone();
                 msg.aquaintance.push(ctx.myself.uuid);
                 newcomer_mailbox.push(msg);
+            }
+            whisper::MessageType::MissedMessagesRequest => {
+                let msgs = get_stored_messages(ctx);
+                if msgs.is_err() {
+                    continue;
+                }
+                let msgs = msgs.unwrap();
+                let mut first_missed = None;
+                for j in msgs.iter().enumerate() {
+                    if j.1.timestamp == i.timestamp {
+                        first_missed = Some(j.0);
+                        break;
+                    }
+                }
+                if first_missed.is_none() {
+                    continue;
+                }
+                let first_missed = first_missed.unwrap();
+                let mut sender = None;
+                for j in ctx.connections.iter_mut() {
+                    if i.sender == *j {
+                        sender = Some(j);
+                        break;
+                    }
+                }
+                if sender.is_none() {
+                    continue;
+                }
+                let sender = sender.unwrap();
+                for mut j in msgs[first_missed..].to_vec() {
+                    openssl::rand::rand_bytes(&mut j.next_iv);
+                    let encrypted = j.encrypt(&ctx.cipher, &ctx.enc_key, &sender.iv).unwrap();
+                    speach::send_data(sender.stream.as_mut().unwrap(), &encrypted);
+                    sender.iv = j.next_iv.clone();
+                }
             }
             whisper::MessageType::EncryptionRequest => {} // cannot happen, as those can only be unencrypted
         }
@@ -307,7 +342,86 @@ fn store_text_messages(ctx: &mut State, messages: &Vec<whisper::Message>) -> Res
     Ok(())
 }
 
+fn request_missed(ctx: &mut State) -> Result<Vec<whisper::Message>> {
+    let db = sled::open(match ctx.config.lock() {
+        Ok(cfg) => cfg.stored_messages_filename.clone(),
+        _ => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "db poisoned",
+            ))
+        }
+    })
+    // maybe don't crash here?
+    .expect("Unable to open messages db");
+    let last_msg_timestamp = match db.last().expect("unable to access db") {
+        Some(pair) => {
+            //i128::from_ne_bytes(&pair.0.to_vec()),
+            let mut timestamp = [0u8; 16];
+            timestamp.copy_from_slice(pair.0.as_ref());
+            i128::from_ne_bytes(timestamp)
+        }
+        None => 0i128,
+    };
+    let mut request = whisper::Message::new(
+        whisper::MessageType::MissedMessagesRequest,
+        &ctx.myself,
+        &last_msg_timestamp.to_string(),
+        vec![ctx.myself.uuid],
+        0,
+        &vec![0u8; ctx.cipher.iv_len().unwrap_or_default()],
+        std::time::SystemTime::now(),
+    );
+    openssl::rand::rand_bytes(&mut request.next_iv);
+    // TODO: maybe choose random
+    let encrypted = request
+        .encrypt(
+            &ctx.cipher,
+            &ctx.enc_key,
+            match ctx.connections.first() {
+                Some(con) => &con.iv,
+                None => {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::AddrNotAvailable,
+                        "no connections established",
+                    ))
+                }
+            },
+        )
+        .unwrap();
+    ctx.connections.first_mut().unwrap().iv = request.next_iv.clone();
+    speach::send_data(
+        ctx.connections
+            .first_mut()
+            .unwrap()
+            .stream
+            .as_mut()
+            .unwrap(),
+        &encrypted,
+    );
+    // this will not return anything now, but server will catch up later just fine
+    // will be fixed when this becomes client-side
+    Ok(speach::receive_messages_enc(
+        ctx.connections.first_mut().unwrap(),
+        &ctx.cipher,
+        &ctx.enc_key,
+    ))
+}
+
 fn server_thread(mut state: State) {
+    //TODO: make it client side
+    let missed_msgs = request_missed(&mut state);
+    if missed_msgs.is_ok() {
+        let missed_msgs = missed_msgs.unwrap();
+        for i in missed_msgs {
+            match i.msgtype {
+                whisper::MessageType::Text => {
+                    state.tx.send(i).expect("Unable to send message to client!");
+                }
+                _ => {}
+            }
+        }
+    }
     let mut postponed_storage = Vec::<whisper::Message>::new();
     loop {
         let mailbox = recv_messages(&mut state);
@@ -326,9 +440,7 @@ fn server_thread(mut state: State) {
         // direct connections
         // create gossip
         let mut newcomer_mailbox = receive_newcomers(&mut state);
-        //if newcomer_mailbox.is_ok() {
         gossip.append(&mut newcomer_mailbox);
-        //}
         spread_gossip(&mut state, gossip);
         if let Ok(_) = state.conf_change_sig_rx.try_recv() {
             if let Ok(stored_messages) = get_stored_messages(&mut state) {
