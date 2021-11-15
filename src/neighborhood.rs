@@ -1,4 +1,9 @@
+use std::io::Result;
 use std::net::{SocketAddr, TcpStream};
+
+use crate::config;
+use crate::speach;
+use crate::whisper;
 
 pub struct Node {
     pub name: String,
@@ -46,7 +51,7 @@ impl Node {
         };
         json::stringify(node)
     }
-    pub fn from_str(json_node: &str) -> Result<Node, json::Error> {
+    pub fn from_str(json_node: &str) -> json::Result<Node> {
         let parse_try = json::parse(json_node);
         match parse_try {
             Err(parse_error) => Err(parse_error),
@@ -85,4 +90,146 @@ impl Node {
             iv: vec![0; 12],
         }
     }
+}
+
+// different in that people connect to us directly here instead of us receiving gossip
+pub fn receive_newcomers(ctx: &mut config::State) -> Vec<whisper::Message> {
+    let mut newcomer_mailbox = Vec::<whisper::Message>::new();
+    for listener in ctx.listener_rx.iter_mut() {
+        while let Ok(mut new_connection) = listener.try_recv() {
+            if let Ok(mut message) = speach::receive_greeting(&mut new_connection) {
+                println!(
+                    "New connection from {}",
+                    new_connection.peer_addr().unwrap()
+                );
+                if speach::send_data(&mut new_connection, ctx.announcement.to_string().as_bytes())
+                    .is_err()
+                {
+                    // failed to connect to this peer
+                    continue;
+                }
+                // possibly always true
+                if !message.contents.contains("gossipless") {
+                    // sender should ask about encryption now
+                    let requests = speach::receive_greeting(&mut new_connection);
+                    new_connection.set_nonblocking(true).unwrap();
+                    let mut encryption_request: Option<whisper::Message> = None;
+                    for i in requests {
+                        if i.msgtype == whisper::MessageType::EncryptionRequest {
+                            encryption_request = Some(i);
+                        }
+                    }
+                    if let Some(encryption_request) = encryption_request {
+                        let public_key = encryption_request.contents.as_bytes();
+                        let pkey_temp =
+                            openssl::pkey::PKey::public_key_from_pem(public_key).unwrap();
+                        let temp_encrypter = openssl::encrypt::Encrypter::new(&pkey_temp).unwrap();
+                        if speach::authenticate(&encryption_request.sender, &mut new_connection) {
+                            // TODO: think about what to do when this fails
+                            speach::send_encryption_data(
+                                &mut new_connection,
+                                &ctx.enc_key,
+                                &temp_encrypter,
+                            );
+                            // ugly
+                            speach::send_encryption_data(
+                                &mut new_connection,
+                                &ctx.myself.iv,
+                                &temp_encrypter,
+                            );
+                        } else {
+                            // TODO: report invalid auth data
+                            continue;
+                        }
+                    }
+                } else {
+                    new_connection.set_nonblocking(true).unwrap();
+                }
+                // sender doesn't know it's address, so we tell everyone where from we got the
+                // message
+                message
+                    .sender
+                    .address
+                    .set_ip(new_connection.peer_addr().unwrap().ip());
+                if !message.contents.contains("gossipless") {
+                    message.aquaintance.push(ctx.myself.uuid);
+                    newcomer_mailbox.push(message.clone());
+                }
+                let mut new_node = Node::new(
+                    message.sender.name,
+                    message.sender.uuid,
+                    Some(new_connection),
+                );
+                new_node.iv = ctx.myself.iv.clone();
+                ctx.connections.push(new_node);
+            }
+        }
+    }
+    newcomer_mailbox
+}
+
+pub fn request_missed(ctx: &mut config::State) -> Result<Vec<whisper::Message>> {
+    let db = sled::open(match ctx.config.lock() {
+        Ok(cfg) => cfg.stored_messages_filename.clone(),
+        _ => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "db poisoned",
+            ))
+        }
+    })
+    // maybe don't crash here?
+    .expect("Unable to open messages db");
+    let last_msg_timestamp = match db.last().expect("unable to access db") {
+        Some(pair) => {
+            //i128::from_ne_bytes(&pair.0.to_vec()),
+            let mut timestamp = [0u8; 16];
+            timestamp.copy_from_slice(pair.0.as_ref());
+            i128::from_ne_bytes(timestamp)
+        }
+        None => 0i128,
+    };
+    let mut request = whisper::Message::new(
+        whisper::MessageType::MissedMessagesRequest,
+        &ctx.myself,
+        &last_msg_timestamp.to_string(),
+        vec![ctx.myself.uuid],
+        0,
+        &vec![0u8; ctx.cipher.iv_len().unwrap_or_default()],
+        std::time::SystemTime::now(),
+    );
+    openssl::rand::rand_bytes(&mut request.next_iv);
+    // TODO: maybe choose random
+    let encrypted = request
+        .encrypt(
+            &ctx.cipher,
+            &ctx.enc_key,
+            match ctx.connections.first() {
+                Some(con) => &con.iv,
+                None => {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::AddrNotAvailable,
+                        "no connections established",
+                    ))
+                }
+            },
+        )
+        .unwrap();
+    ctx.connections.first_mut().unwrap().iv = request.next_iv.clone();
+    speach::send_data(
+        ctx.connections
+            .first_mut()
+            .unwrap()
+            .stream
+            .as_mut()
+            .unwrap(),
+        &encrypted,
+    );
+    // this will not return anything now, but server will catch up later just fine
+    // will be fixed when this becomes client-side
+    Ok(speach::receive_messages_enc(
+        ctx.connections.first_mut().unwrap(),
+        &ctx.cipher,
+        &ctx.enc_key,
+    ))
 }

@@ -4,7 +4,9 @@ use openssl::symm::*;
 use std::io::prelude::*;
 use std::net::{SocketAddr, TcpStream};
 
+use crate::config;
 use crate::neighborhood;
+use crate::whisper;
 
 pub fn receive_messages_enc(
     node: &mut neighborhood::Node,
@@ -38,6 +40,53 @@ pub fn receive_messages_enc(
         }
     }
     messages
+}
+
+pub fn recv_messages(ctx: &mut config::State) -> Vec<whisper::Message> {
+    let mut mailbox = Vec::<whisper::Message>::new();
+    for i in ctx.connections.iter_mut() {
+        if i.stream.is_some() {
+            let connection_messages = receive_messages_enc(i, &ctx.cipher, &ctx.enc_key);
+            mailbox.extend(connection_messages);
+        }
+    }
+    mailbox
+}
+
+pub fn spread_gossip(ctx: &mut config::State, mailbox: Vec<whisper::Message>) {
+    let mut to_send = Vec::<u32>::with_capacity(ctx.connections.len());
+    for i in ctx.connections.iter() {
+        if i.stream.is_some() {
+            to_send.push(i.uuid);
+        }
+    }
+    // mutex should be dropped right away, as there's no name assigned to mutex handler,
+    // meaning it'll get dropped right away
+    let mut send_limit = ctx.config.try_lock().unwrap().max_send_peers;
+    for i in ctx.connections.iter_mut() {
+        if send_limit == 0 {
+            return;
+        }
+        if i.stream.is_none() {
+            continue;
+        }
+        // it is essential to send each and every message here if possible, otherwise data will be lost in the network
+        for mut j in mailbox.clone() {
+            if !j.aquaintance.contains(&i.uuid) {
+                // have to let the receiver know who's seen the message already
+                for k in to_send.iter() {
+                    j.aquaintance.push(*k);
+                }
+                j.next_sender = *to_send.last().unwrap();
+                openssl::rand::rand_bytes(&mut j.next_iv);
+                let encrypted = j.encrypt(&ctx.cipher, &ctx.enc_key, &i.iv).unwrap();
+                i.iv = j.next_iv.clone();
+                // TODO: ask someone else to deliver this message if this fails
+                send_data(i.stream.as_mut().unwrap(), &encrypted);
+            }
+        }
+        send_limit -= 1;
+    }
 }
 
 pub fn receive_greeting(stream: &mut TcpStream) -> Result<crate::whisper::Message, std::io::Error> {
@@ -130,7 +179,7 @@ pub fn get_key(
     }
 }
 
-fn get_encryption_data(
+pub fn get_encryption_data(
     stream: &mut TcpStream,
     decrypter: &Decrypter,
 ) -> Result<Vec<u8>, std::io::Error> {
