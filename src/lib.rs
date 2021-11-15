@@ -311,7 +311,9 @@ fn server_thread(mut state: State) {
     let mut postponed_storage = Vec::<whisper::Message>::new();
     loop {
         let mailbox = recv_messages(&mut state);
-        // TODO store stuff from postponed
+        if let Ok(_) = store_text_messages(&mut state, &postponed_storage) {
+            postponed_storage.clear();
+        }
         if let Err(_) = store_text_messages(&mut state, &mailbox) {
             postponed_storage.extend_from_slice(&mailbox[..]);
         }
