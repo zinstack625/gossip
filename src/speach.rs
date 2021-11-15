@@ -69,6 +69,7 @@ pub fn init_connection(
     address: &SocketAddr,
     announcement: &crate::whisper::Message,
 ) -> Result<crate::neighborhood::Node, std::io::Error> {
+    println!("Connecting to {}", address);
     let mut stream = TcpStream::connect(address)?;
     stream.set_nonblocking(false)?;
     send_data(&mut stream, announcement.to_string().as_bytes())?;

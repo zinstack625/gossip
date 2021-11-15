@@ -14,7 +14,7 @@ mod speach;
 pub mod whisper;
 
 struct State {
-    listener_rx: mpsc::Receiver<TcpStream>,
+    listener_rx: Vec<mpsc::Receiver<TcpStream>>,
     cipher: openssl::symm::Cipher,
     myself: neighborhood::Node,
     announcement: whisper::Message,
@@ -26,8 +26,8 @@ struct State {
     rx: mpsc::Receiver<whisper::Message>,
 }
 
-fn spawn_listener(port: u16) -> (mpsc::Receiver<TcpStream>, SocketAddr) {
-    let mut local_address = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), port);
+fn spawn_listener(local_ip: IpAddr, port: u16) -> (mpsc::Receiver<TcpStream>, SocketAddr) {
+    let mut local_address = SocketAddr::new(local_ip, port);
     let mut listener = TcpListener::bind(local_address);
     while listener.is_err() {
         local_address.set_port(rand::thread_rng().gen_range(7000..50000));
@@ -185,71 +185,74 @@ fn client_duty(ctx: &mut State) {
 // different in that people connect to us directly here instead of us receiving gossip
 fn receive_newcomers(ctx: &mut State) -> Vec<whisper::Message> {
     let mut newcomer_mailbox = Vec::<whisper::Message>::new();
-    while let Ok(mut new_connection) = ctx.listener_rx.try_recv() {
-        if let Ok(mut message) = speach::receive_greeting(&mut new_connection) {
-            println!(
-                "New connection from {}",
-                new_connection.peer_addr().unwrap()
-            );
-            if speach::send_data(&mut new_connection, ctx.announcement.to_string().as_bytes())
-                .is_err()
-            {
-                // failed to connect to this peer
-                continue;
-            }
-            // possibly always true
-            if !message.contents.contains("gossipless") {
-                // sender should ask about encryption now
-                let requests = speach::receive_greeting(&mut new_connection);
-                new_connection.set_nonblocking(true).unwrap();
-                let mut encryption_request: Option<whisper::Message> = None;
-                for i in requests {
-                    if i.msgtype == whisper::MessageType::EncryptionRequest {
-                        encryption_request = Some(i);
-                    }
+    for listener in ctx.listener_rx.iter_mut() {
+        while let Ok(mut new_connection) = listener.try_recv() {
+            if let Ok(mut message) = speach::receive_greeting(&mut new_connection) {
+                println!(
+                    "New connection from {}",
+                    new_connection.peer_addr().unwrap()
+                );
+                if speach::send_data(&mut new_connection, ctx.announcement.to_string().as_bytes())
+                    .is_err()
+                {
+                    // failed to connect to this peer
+                    continue;
                 }
-                if let Some(encryption_request) = encryption_request {
-                    let public_key = encryption_request.contents.as_bytes();
-                    let pkey_temp = openssl::pkey::PKey::public_key_from_pem(public_key).unwrap();
-                    let temp_encrypter = openssl::encrypt::Encrypter::new(&pkey_temp).unwrap();
-                    if speach::authenticate(&encryption_request.sender, &mut new_connection) {
-                        // TODO: think about what to do when this fails
-                        speach::send_encryption_data(
-                            &mut new_connection,
-                            &ctx.enc_key,
-                            &temp_encrypter,
-                        );
-                        // ugly
-                        speach::send_encryption_data(
-                            &mut new_connection,
-                            &ctx.myself.iv,
-                            &temp_encrypter,
-                        );
-                    } else {
-                        // TODO: report invalid auth data
-                        continue;
+                // possibly always true
+                if !message.contents.contains("gossipless") {
+                    // sender should ask about encryption now
+                    let requests = speach::receive_greeting(&mut new_connection);
+                    new_connection.set_nonblocking(true).unwrap();
+                    let mut encryption_request: Option<whisper::Message> = None;
+                    for i in requests {
+                        if i.msgtype == whisper::MessageType::EncryptionRequest {
+                            encryption_request = Some(i);
+                        }
                     }
+                    if let Some(encryption_request) = encryption_request {
+                        let public_key = encryption_request.contents.as_bytes();
+                        let pkey_temp =
+                            openssl::pkey::PKey::public_key_from_pem(public_key).unwrap();
+                        let temp_encrypter = openssl::encrypt::Encrypter::new(&pkey_temp).unwrap();
+                        if speach::authenticate(&encryption_request.sender, &mut new_connection) {
+                            // TODO: think about what to do when this fails
+                            speach::send_encryption_data(
+                                &mut new_connection,
+                                &ctx.enc_key,
+                                &temp_encrypter,
+                            );
+                            // ugly
+                            speach::send_encryption_data(
+                                &mut new_connection,
+                                &ctx.myself.iv,
+                                &temp_encrypter,
+                            );
+                        } else {
+                            // TODO: report invalid auth data
+                            continue;
+                        }
+                    }
+                } else {
+                    new_connection.set_nonblocking(true).unwrap();
                 }
-            } else {
-                new_connection.set_nonblocking(true).unwrap();
+                // sender doesn't know it's address, so we tell everyone where from we got the
+                // message
+                message
+                    .sender
+                    .address
+                    .set_ip(new_connection.peer_addr().unwrap().ip());
+                if !message.contents.contains("gossipless") {
+                    message.aquaintance.push(ctx.myself.uuid);
+                    newcomer_mailbox.push(message.clone());
+                }
+                let mut new_node = neighborhood::Node::new(
+                    message.sender.name,
+                    message.sender.uuid,
+                    Some(new_connection),
+                );
+                new_node.iv = ctx.myself.iv.clone();
+                ctx.connections.push(new_node);
             }
-            // sender doesn't know it's address, so we tell everyone where from we got the
-            // message
-            message
-                .sender
-                .address
-                .set_ip(new_connection.peer_addr().unwrap().ip());
-            if !message.contents.contains("gossipless") {
-                message.aquaintance.push(ctx.myself.uuid);
-                newcomer_mailbox.push(message.clone());
-            }
-            let mut new_node = neighborhood::Node::new(
-                message.sender.name,
-                message.sender.uuid,
-                Some(new_connection),
-            );
-            new_node.iv = ctx.myself.iv.clone();
-            ctx.connections.push(new_node);
         }
     }
     newcomer_mailbox
@@ -467,7 +470,8 @@ pub fn spawn_server(
     mpsc::Receiver<whisper::Message>,
 ) {
     // initializing stuff
-    let (listener_rx, local_address) = spawn_listener(42378);
+    let (listener_rx, local_address) = spawn_listener("127.0.0.1".parse().unwrap(), 42378);
+    let (listener_rxv6, local_addressv6) = spawn_listener("::".parse().unwrap(), 42378);
     let uuid: u32 = rand::thread_rng().gen();
     println!("I am {}", uuid);
     let cipher = openssl::symm::Cipher::aes_256_gcm();
@@ -510,7 +514,7 @@ pub fn spawn_server(
     let (tx, client_rx) = mpsc::channel();
     let (client_tx, rx) = mpsc::channel();
     let init_state = State {
-        listener_rx,
+        listener_rx: vec![listener_rx, listener_rxv6],
         cipher,
         myself,
         announcement,
