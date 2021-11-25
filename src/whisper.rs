@@ -1,6 +1,8 @@
 use openssl::symm::*;
 use std::time::{Duration, UNIX_EPOCH};
 
+use crate::neighborhood;
+
 #[derive(Copy, Clone, PartialEq)]
 pub enum MessageType {
     Text,
@@ -36,6 +38,21 @@ impl Message {
             next_sender,
             next_iv: next_iv.to_vec(),
             timestamp,
+        }
+    }
+    pub fn from_client(
+        msgtype: MessageType,
+        self_name: &String,
+        contents: &String,
+        ) -> Message {
+        Message {
+            msgtype,
+            sender: neighborhood::Node::new(self_name.clone(), 0, None),
+            contents: contents.clone(),
+            aquaintance: vec![],
+            next_sender: 0,
+            next_iv: vec![],
+            timestamp: std::time::SystemTime::now(),
         }
     }
     pub fn format(&self) -> String {

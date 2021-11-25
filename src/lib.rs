@@ -8,6 +8,7 @@ pub mod neighborhood;
 mod politeness;
 mod speach;
 pub mod whisper;
+pub mod error;
 
 use neighborhood::*;
 
@@ -49,7 +50,8 @@ fn server_thread(state: Arc<Mutex<config::State>>, receiver_rx: mpsc::Receiver<w
         if let Err(_) = politeness::store_text_message(state.clone(), &msg) {
             postponed_storage.push(msg.clone());
         }
-        politeness::process_message(state.clone(), msg);
+        let processor_ctx = state.clone();
+        std::thread::spawn(move || politeness::process_message(processor_ctx, msg));
     }
 }
 
@@ -94,6 +96,7 @@ fn gossiper_thread(ctx: Arc<Mutex<config::State>>, gossiper_rx: mpsc::Receiver<w
             continue;
         }
         msg.next_sender = *to_send.last().unwrap();
+        msg.next_iv = vec![0u8; ctx.cipher.iv_len().unwrap()];
         let mut send_limit = ctx.config.lock().unwrap().max_send_peers;
         let cipher = ctx.cipher.clone();
         let enc_key = ctx.enc_key.clone();
@@ -120,11 +123,7 @@ fn gossiper_thread(ctx: Arc<Mutex<config::State>>, gossiper_rx: mpsc::Receiver<w
 pub fn spawn_server(
     client_name: String,
     init_nodes: Vec<SocketAddr>,
-    config_rx: mpsc::Receiver<config::Config>,
-) -> (
-    mpsc::Sender<whisper::Message>,
-    mpsc::Receiver<whisper::Message>,
-) {
+) -> config::ClientHandle {
     // initializing stuff
     let uuid: u32 = rand::thread_rng().gen();
     println!("I am {}", uuid);
@@ -149,6 +148,7 @@ pub fn spawn_server(
     let (client_tx, rx) = mpsc::channel();
     let (receiver_tx, receiver_rx) = mpsc::channel();
     let (gossiper_tx, gossiper_rx) = mpsc::channel();
+    let (config_tx, config_rx) = mpsc::channel();
     let init_state = Arc::new(Mutex::new(config::State {
         receiver_tx,
         gossiper_tx,
@@ -203,5 +203,10 @@ pub fn spawn_server(
     let gossiper_ctx = init_state.clone();
     let _gossiper_thread = thread::spawn(move || gossiper_thread(gossiper_ctx, gossiper_rx));
     let _server_thread = thread::spawn(move || server_thread(init_state, receiver_rx));
-    (client_tx, client_rx)
+
+    config::ClientHandle::new(
+        client_tx,
+        Some(client_rx),
+        config_tx,
+    )
 }

@@ -41,6 +41,8 @@ pub fn client_duty(
     loop {
         if let Ok(mut msg) = client_rx.recv() {
             msg.aquaintance.push(ctx.lock().unwrap().myself.uuid);
+            msg.sender = ctx.lock().unwrap().myself.clone();
+            msg.next_iv = vec![0u8; ctx.lock().unwrap().cipher.iv_len().unwrap()];
             let send_limit = ctx.lock().unwrap().config.lock().unwrap().max_send_peers;
             let mut to_send = Vec::<u32>::with_capacity(send_limit);
             for i in ctx.lock().unwrap().connections.iter() {
