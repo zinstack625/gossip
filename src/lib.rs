@@ -43,7 +43,8 @@ fn server_thread(state: Arc<Mutex<config::State>>, receiver_rx: mpsc::Receiver<w
     request_missed(&mut state.lock().unwrap());
     let mut postponed_storage = Vec::<whisper::Message>::new();
     loop {
-        let msg = receiver_rx.recv().expect("MPSC queue broken");
+        let mut msg = receiver_rx.recv().expect("MPSC queue broken");
+        msg.next_iv.resize(state.lock().unwrap().cipher.iv_len().unwrap(), 0u8);
         if let Ok(_) = politeness::store_text_messages(state.clone(), &postponed_storage) {
             postponed_storage.clear();
         }
@@ -189,6 +190,7 @@ pub fn spawn_server(
         "Ready announcement: {}",
         init_state.lock().unwrap().announcement.to_string()
     );
+    // first node in the network
     if !speach::initial_connections(init_state.clone(), init_nodes) {
         let mut ctx = init_state.lock().unwrap();
         ctx.myself.iv.resize(cipher.iv_len().unwrap_or_default(), 0);

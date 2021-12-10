@@ -1,11 +1,18 @@
 use crate::config;
 use crate::speach;
+use crate::speach::init_connection;
 use crate::whisper;
 use std::io::Result;
+use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 
 pub fn greet_newcomer(ctx: Arc<Mutex<config::State>>, msg: whisper::Message) {
     let newcomer = msg.sender.clone();
+    for i in ctx.lock().unwrap().connections.iter() {
+        if newcomer == *i {
+            return;
+        }
+    }
     let address = newcomer.address.as_ref();
     if address.is_some() {
         println!("Was told to connect to {}", address.unwrap().to_string());
@@ -92,32 +99,26 @@ pub fn process_message(ctx: Arc<Mutex<config::State>>, message: whisper::Message
                 .send(message)
                 .expect("Unable to send message to client!");
         }
+        // TODO: deprecating
         whisper::MessageType::NewMember => {
             greet_newcomer(ctx, message);
         }
         whisper::MessageType::MissedMessagesRequest => {
+            // send missed messages
             // better to get mutex for the whole operation
             let mut ctx = ctx.lock().unwrap();
+            let cipher = ctx.cipher.clone();
+            let enc_key = ctx.enc_key.clone();
+            let myself = ctx.myself.clone();
             let msgs = get_stored_messages(&ctx);
             if msgs.is_err() {
                 return;
             }
             let msgs = msgs.unwrap();
-            let mut first_missed = None;
-            for j in msgs.iter().enumerate() {
-                if j.1.timestamp == message.timestamp {
-                    first_missed = Some(j.0);
-                    break;
-                }
-            }
-            if first_missed.is_none() {
-                return;
-            }
-            let first_missed = first_missed.unwrap();
-            let cipher = ctx.cipher.clone();
-            let enc_key = ctx.enc_key.clone();
             let mut sender = None;
+            let mut json_con_array = json::JsonValue::new_array();
             for j in ctx.connections.iter_mut() {
+                json_con_array.push(j.to_string());
                 if message.sender == *j {
                     sender = Some(j);
                     break;
@@ -127,16 +128,79 @@ pub fn process_message(ctx: Arc<Mutex<config::State>>, message: whisper::Message
                 return;
             }
             let sender = sender.unwrap();
-            for mut j in msgs[first_missed..].to_vec() {
-                openssl::rand::rand_bytes(&mut j.next_iv);
-                let encrypted = j.encrypt(&cipher, &enc_key, &sender.iv).unwrap();
-                speach::send_data(sender.stream.as_mut().unwrap(), &encrypted);
-                sender.iv = j.next_iv.clone();
+            let mut first_missed = None;
+            for j in msgs.iter().enumerate() {
+                if j.1.timestamp == message.timestamp {
+                    first_missed = Some(j.0);
+                    break;
+                }
             }
+            if first_missed.is_some() {
+                let first_missed = first_missed.unwrap();
+                for mut j in msgs[first_missed..].to_vec() {
+                    openssl::rand::rand_bytes(&mut j.next_iv);
+                    let encrypted = j.encrypt(&cipher, &enc_key, &sender.iv).unwrap();
+                    speach::send_data(sender.stream.as_mut().unwrap(), &encrypted);
+                    sender.iv = j.next_iv.clone();
+                }
+            }
+            // send network info
+            let mut network_info = whisper::Message::new(
+                whisper::MessageType::NetworkInfo,
+                &myself,
+                &json_con_array.to_string(),
+                vec![myself.uuid],
+                0,
+                &vec![0u8; cipher.iv_len().unwrap_or_default()],
+                std::time::SystemTime::now()
+            );
+            openssl::rand::rand_bytes(&mut network_info.next_iv);
+            let encrypted = network_info.encrypt(&cipher, &enc_key, &sender.iv).unwrap();
+            speach::send_data(sender.stream.as_mut().unwrap(), &encrypted);
+            sender.iv = network_info.next_iv.clone();
         }
         // cannot happen, as those can only be unencrypted
         // and that is processed elsewhere, don't do anything
-        whisper::MessageType::EncryptionRequest => {}
+        whisper::MessageType::EncryptionRequest => {},
+        whisper::MessageType::NetworkInfo => {
+            let tree = json::parse(&message.contents);
+            if tree.is_err() {
+                return;
+            }
+            let tree = tree.unwrap();
+            let myself = ctx.lock().unwrap().myself.clone();
+            for i in tree.members() {
+                if let Some(field) = i.as_str() {
+                    println!("Field: {}", field);
+                    if let Ok(node) = crate::neighborhood::Node::from_str(field) {
+                        for i in ctx.lock().unwrap().connections.iter() {
+                            if *i == node {
+                                continue;
+                            }
+                        }
+                        if node == myself {
+                            continue;
+                        }
+                        if let Some(ipv4) = node.address {
+                            if let Ok(node) = init_connection(ctx.clone(), ipv4, true) {
+                                ctx.lock().unwrap().connections.push(node.clone());
+                                let ctx = ctx.clone();
+                                std::thread::spawn(move || speach::receive_messages_enc(ctx, node));
+                                return;
+                            }
+                        }
+                        if let Some(ipv6) = node.addressv6 {
+                            if let Ok(node) = init_connection(ctx.clone(), ipv6, true) {
+                                ctx.lock().unwrap().connections.push(node.clone());
+                                let ctx = ctx.clone();
+                                std::thread::spawn(move || speach::receive_messages_enc(ctx, node));
+                                return;
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 

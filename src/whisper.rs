@@ -1,5 +1,5 @@
 use openssl::symm::*;
-use std::time::{Duration, UNIX_EPOCH};
+use std::{time::{Duration, UNIX_EPOCH}, fmt::Display, str::FromStr};
 
 use crate::neighborhood;
 
@@ -9,6 +9,37 @@ pub enum MessageType {
     NewMember,
     EncryptionRequest,
     MissedMessagesRequest,
+    NetworkInfo,
+}
+
+impl Display for MessageType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let stringified = match self {
+            &MessageType::Text =>                     "Text",
+            &MessageType::NewMember =>                "NewMember",
+            &MessageType::EncryptionRequest =>        "EncryptionRequest",
+            &MessageType::MissedMessagesRequest =>    "MissedMessagesRequest",
+            &MessageType::NetworkInfo =>              "NetworkInfo",
+        };
+        write!(f, "{}", stringified)
+    }
+}
+
+impl FromStr for MessageType {
+    type Err = std::io::Error;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let result = match s {
+            "Text" =>                   Ok(MessageType::Text),
+            "NewMember" =>              Ok(MessageType::NewMember),
+            "EncryptionRequest" =>      Ok(MessageType::EncryptionRequest),
+            "MissedMessagesRequest" =>  Ok(MessageType::MissedMessagesRequest),
+            "NetworkInfo" =>            Ok(MessageType::NetworkInfo),
+            _ => Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "Unsupported message type"))
+        };
+        result
+    }
 }
 #[derive(Clone)]
 pub struct Message {
@@ -74,12 +105,7 @@ impl Message {
     }
     pub fn to_string(&self) -> String {
         let message = json::object! {
-            msgtype: match self.msgtype {
-                MessageType::NewMember => "NewMember",
-                MessageType::Text => "Text",
-                MessageType::EncryptionRequest => "EncryptionRequest",
-                MessageType::MissedMessagesRequest => "MissedMessagesRequest",
-            },
+            msgtype: self.msgtype.to_string(),
             sender: self.sender.to_string(),
             contents: self.contents.clone(),
             aquaintance: self.aquaintance.clone(),
@@ -95,17 +121,35 @@ impl Message {
             Err(parse_error) => Err(parse_error),
             Ok(mut json_node) => {
                 let parsed_msg = Message {
-                    msgtype: match json_node["msgtype"].take_string().unwrap().as_str() {
-                        "NewMember" => MessageType::NewMember,
-                        "EncryptionRequest" => MessageType::EncryptionRequest,
-                        "MissedMessagesRequest" => MessageType::MissedMessagesRequest,
-                        _ => MessageType::Text,
+                    msgtype: {
+                        if let Some(obj) = json_node["msgtype"].take_string() {
+                            if let Ok(msgtype) = MessageType::from_str(&obj) {
+                                msgtype
+                            } else {
+                                return Err(json::Error::UnexpectedEndOfJson);
+                            }
+                        } else {
+                            return Err(json::Error::UnexpectedEndOfJson);
+                        }
                     },
-                    sender: crate::neighborhood::Node::from_str(
-                        json_node["sender"].take_string().unwrap().as_str(),
-                    )
-                    .unwrap(),
-                    contents: json_node["contents"].take_string().unwrap(),
+                    sender: {
+                        let mut result = Err(json::Error::UnexpectedEndOfJson);
+                        if let Some(obj) = json_node["sender"].take_string() {
+                            if let Ok(node) = neighborhood::Node::from_str(&obj) {
+                                result = Ok(node);
+                            }
+                        }
+                        if result.is_ok() {
+                            result.unwrap()
+                        } else {
+                            return Err(json::Error::UnexpectedEndOfJson);
+                        }
+                    },
+                    contents: if let Some(cont) = json_node["contents"].take_string() {
+                        cont
+                    } else {
+                        return Err(json::Error::UnexpectedEndOfJson);
+                    },
                     aquaintance: {
                         let mut aquaintance_vec =
                             Vec::<u32>::with_capacity(json_node["aquaintance"].len());

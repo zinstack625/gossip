@@ -67,12 +67,23 @@ impl Node {
         match parse_try {
             Err(parse_error) => Err(parse_error),
             Ok(mut json_tree) => Ok(Node {
-                // TODO: this is obviously very bug prone and needs error handling instead of unwrapping
-                name: json_tree["name"].take_string().unwrap(),
-                uuid: match std::convert::TryFrom::try_from(json_tree["uuid"].as_number().unwrap())
-                {
-                    Ok(num) => num,
-                    _ => 0,
+                name: {
+                    let parse = json_tree["name"].take_string();
+                    if parse.is_some() {
+                        parse.unwrap()
+                    } else {
+                        return Err(json::Error::UnexpectedEndOfJson);
+                    }
+                },
+                uuid: {
+                    if let Some(id) = json_tree["uuid"].as_number() {
+                        match std::convert::TryFrom::try_from(id) {
+                            Ok(num) => num,
+                            _ => 0,
+                        }
+                    } else {
+                        return Err(json::Error::UnexpectedEndOfJson);
+                    }
                 },
                 stream: None,
                 address: {
@@ -171,6 +182,7 @@ pub fn receive_newcomer(ctx: Arc<Mutex<config::State>>, mut stream: TcpStream) -
         for i in requests {
             if i.msgtype == whisper::MessageType::EncryptionRequest {
                 encryption_request = Some(i);
+                break;
             }
         }
         if let Some(encryption_request) = encryption_request {
@@ -215,11 +227,12 @@ pub fn receive_newcomer(ctx: Arc<Mutex<config::State>>, mut stream: TcpStream) -
         message.sender.uuid,
         Some(stream),
     );
-    if !message.contents.contains("gossipless") {
-        message.aquaintance.push(ctx.lock().unwrap().myself.uuid);
-        ctx.lock().unwrap().gossiper_tx.send(message);
-    }
+    // don't share the newcomer with the network
+    // instead let the newcomer connect to everyone
+    //ctx.lock().unwrap().gossiper_tx.send(message);
     new_node.iv = ctx.lock().unwrap().myself.iv.clone();
+    new_node.address = msg_addr.clone();
+    new_node.addressv6 = msg_addrv6.clone();
     Ok(new_node)
 }
 

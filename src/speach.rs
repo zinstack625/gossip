@@ -40,11 +40,12 @@ pub fn receive_messages_enc(ctx: Arc<Mutex<config::State>>, mut node: neighborho
                 let count = decrypt.update(&buffer, &mut decrypted).unwrap();
                 decrypted.truncate(count);
                 if let Ok(packet) = std::str::from_utf8(&decrypted) {
-                    if let Ok(msg) = whisper::Message::from_str(packet) {
+                    if let Ok(mut msg) = whisper::Message::from_str(packet) {
                         node.iv = msg.next_iv.clone();
                         for i in ctx.connections.iter_mut() {
                             if node == *i {
                                 i.iv = node.iv.clone();
+                                msg.sender = i.clone();
                             }
                         }
                         ctx.receiver_tx.send(msg);
