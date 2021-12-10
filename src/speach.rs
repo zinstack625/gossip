@@ -96,7 +96,7 @@ pub fn receive_greeting(stream: &mut TcpStream) -> Result<whisper::Message, std:
     let mut buffer_size = [0u8; 8];
     stream.set_read_timeout(Some(Duration::new(30, 0)))?;
     if let Ok(_) = stream.read_exact(&mut buffer_size) {
-        println!("Got greeting!");
+        log::info!("Got greeting!");
         let buffer_size = u64::from_be_bytes(buffer_size);
         let mut buffer = vec![0u8; buffer_size as usize];
         let _ = stream.read_exact(&mut buffer);
@@ -125,7 +125,7 @@ pub fn init_connection(
     address: SocketAddr,
     announce_me: bool,
 ) -> Result<neighborhood::Node, std::io::Error> {
-    println!("Connecting to {}", address);
+    log::info!("Connecting to {}", address);
     let mut stream = TcpStream::connect(address)?;
     stream.set_nonblocking(false);
     let mut announcement = ctx.lock().unwrap().announcement.clone();
@@ -143,7 +143,7 @@ pub fn init_connection(
             }
             ctx.connections.push(peer.clone());
         }
-        println!("Connection inited");
+        log::info!("Connection inited");
         Ok(peer)
     } else {
         Err(std::io::Error::new(

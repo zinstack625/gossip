@@ -170,7 +170,7 @@ impl Node {
 // different in that people connect to us directly here instead of us receiving gossip
 pub fn receive_newcomer(ctx: Arc<Mutex<config::State>>, mut stream: TcpStream) -> Result<Node> {
     let mut message = speach::receive_greeting(&mut stream)?;
-    println!("New connection from {}", stream.peer_addr().unwrap());
+    log::info!("New connection from {}", stream.peer_addr().unwrap());
     speach::send_data(
         &mut stream,
         ctx.lock().unwrap().announcement.to_string().as_bytes(),

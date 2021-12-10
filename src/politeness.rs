@@ -15,11 +15,11 @@ pub fn greet_newcomer(ctx: Arc<Mutex<config::State>>, msg: whisper::Message) {
     }
     let address = newcomer.address.as_ref();
     if address.is_some() {
-        println!("Was told to connect to {}", address.unwrap().to_string());
+        log::info!("Was told to connect to {}", address.unwrap().to_string());
     }
     let addressv6 = newcomer.addressv6.as_ref();
     if addressv6.is_some() {
-        println!("Was told to connect to {}", addressv6.unwrap().to_string());
+        log::info!("Was told to connect to {}", addressv6.unwrap().to_string());
     }
     for i in ctx.lock().unwrap().connections.iter() {
         if i.uuid == newcomer.uuid {
@@ -171,7 +171,7 @@ pub fn process_message(ctx: Arc<Mutex<config::State>>, message: whisper::Message
             let myself = ctx.lock().unwrap().myself.clone();
             for i in tree.members() {
                 if let Some(field) = i.as_str() {
-                    println!("Field: {}", field);
+                    log::info!("Field: {}", field);
                     if let Ok(node) = crate::neighborhood::Node::from_str(field) {
                         for i in ctx.lock().unwrap().connections.iter() {
                             if *i == node {

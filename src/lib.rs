@@ -34,7 +34,7 @@ fn spawn_listener(ctx: Arc<Mutex<config::State>>, local_ip: IpAddr, port: u16) -
             }
         }
     });
-    println!("Listening at {}", local_address);
+    log::info!("Listening at {}", local_address);
     local_address.port()
 }
 
@@ -127,7 +127,7 @@ pub fn spawn_server(
 ) -> config::ClientHandle {
     // initializing stuff
     let uuid: u32 = rand::thread_rng().gen();
-    println!("I am {}", uuid);
+    log::info!("I am {}", uuid);
     let cipher = openssl::symm::Cipher::aes_256_gcm();
     let mut myself = neighborhood::Node::with_address(
         client_name.clone(),
@@ -167,26 +167,26 @@ pub fn spawn_server(
         let mut ctx = init_state.lock().unwrap();
         let my_addr = ctx.myself.address.as_mut();
         if my_addr.is_some() {
-            println!("Setting IPV4 port: {}", port);
+            log::info!("Setting IPV4 port: {}", port);
             my_addr.unwrap().set_port(port);
         }
         let my_addrv6 = ctx.myself.addressv6.as_mut();
         if my_addrv6.is_some() {
-            println!("Setting IPV6 port: {}", portv6);
+            log::info!("Setting IPV6 port: {}", portv6);
             my_addrv6.unwrap().set_port(portv6);
         }
         let my_ann_addr = ctx.announcement.sender.address.as_mut();
         if my_ann_addr.is_some() {
-            println!("Setting IPV4 port in announcement: {}", port);
+            log::info!("Setting IPV4 port in announcement: {}", port);
             my_ann_addr.unwrap().set_port(port);
         }
         let my_ann_addrv6 = ctx.announcement.sender.addressv6.as_mut();
         if my_ann_addrv6.is_some() {
-            println!("Setting IPV6 port in announcement: {}", portv6);
+            log::info!("Setting IPV6 port in announcement: {}", portv6);
             my_ann_addrv6.unwrap().set_port(portv6);
         }
     }
-    println!(
+    log::info!(
         "Ready announcement: {}",
         init_state.lock().unwrap().announcement.to_string()
     );
