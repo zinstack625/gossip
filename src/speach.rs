@@ -45,7 +45,6 @@ pub fn receive_messages_enc(ctx: Arc<Mutex<config::State>>, mut node: neighborho
                         for i in ctx.connections.iter_mut() {
                             if node == *i {
                                 i.iv = node.iv.clone();
-                                msg.sender = i.clone();
                             }
                         }
                         ctx.receiver_tx.send(msg);
