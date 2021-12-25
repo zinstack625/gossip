@@ -1,36 +1,6 @@
-use crate::config;
-use crate::neighborhood;
-use crate::speach;
-use crate::speach::init_connection;
-use crate::whisper;
+use crate::{config, neighborhood, speach, whisper};
 use std::io::Result;
-use std::str::FromStr;
 use std::sync::{Arc, Mutex};
-
-pub fn greet_newcomer(ctx: Arc<Mutex<config::State>>, msg: whisper::Message) {
-    let newcomer = msg.sender.clone();
-    for i in ctx.lock().unwrap().connections.iter() {
-        if newcomer == *i {
-            return;
-        }
-    }
-    let address = newcomer.address.as_ref();
-    if address.is_some() {
-        log::info!("Was told to connect to {}", address.unwrap().to_string());
-    }
-    for i in ctx.lock().unwrap().connections.iter() {
-        if i.uuid == newcomer.uuid {
-            return;
-        }
-    }
-    let connect_addr = newcomer.address.as_ref();
-    if connect_addr.is_some() {
-        if let Ok(node) = speach::init_connection(ctx.clone(), newcomer.address.unwrap(), false) {
-            let ctx = ctx.clone();
-            std::thread::spawn(move || speach::receive_messages_enc(ctx, node));
-        }
-    }
-}
 
 pub fn client_duty(
     ctx: Arc<Mutex<config::State>>,
@@ -55,7 +25,7 @@ pub fn client_duty(
                     break;
                 }
             }
-            if let Some(last_recvr) = to_send.last() {
+            if let Some(last_recvr) = msg.aquaintance.last() {
                 msg.next_sender = *last_recvr;
             } else {
                 continue;
@@ -65,6 +35,7 @@ pub fn client_duty(
             for i in ctx.connections.iter() {
                 log::info!("{}", i.to_string());
             }
+            log::info!("Message: {}", msg.to_string());
             let cipher = ctx.cipher.clone();
             let enc_key = ctx.enc_key.clone();
             for i in ctx.connections.iter_mut() {
@@ -81,7 +52,10 @@ pub fn client_duty(
     }
 }
 
-fn find_sender<'a>(ctx: &'a mut config::State, msg_sender: &neighborhood::Node) -> Option<&'a mut neighborhood::Node> {
+fn find_sender<'a>(
+    ctx: &'a mut config::State,
+    msg_sender: &neighborhood::Node,
+) -> Option<&'a mut neighborhood::Node> {
     let mut sender = None;
     for j in ctx.connections.iter_mut() {
         if *msg_sender == *j {
@@ -134,7 +108,7 @@ fn send_network_info(ctx: Arc<Mutex<config::State>>, message: &whisper::Message)
         vec![ctx.myself.uuid],
         0,
         &vec![0u8; ctx.cipher.iv_len().unwrap_or_default()],
-        std::time::SystemTime::now()
+        std::time::SystemTime::now(),
     );
     let cipher = ctx.cipher.clone();
     let enc_key = ctx.enc_key.clone();
@@ -146,6 +120,36 @@ fn send_network_info(ctx: Arc<Mutex<config::State>>, message: &whisper::Message)
     }
 }
 
+fn connect_to_reported(ctx: Arc<Mutex<config::State>>, message: &whisper::Message) {
+    let tree = json::parse(&message.contents);
+    if tree.is_err() {
+        return;
+    }
+    let tree = tree.unwrap();
+    let myself = ctx.lock().unwrap().myself.clone();
+    for i in tree.members() {
+        if let Some(field) = i.as_str() {
+            if let Ok(node) = crate::neighborhood::Node::from_str(field) {
+                for i in ctx.lock().unwrap().connections.iter() {
+                    if *i == node {
+                        continue;
+                    }
+                }
+                if node == myself {
+                    continue;
+                }
+                ctx.lock().unwrap().network_info.push(node.clone());
+                if let Some(ipv4) = node.address {
+                    if let Ok(node) = speach::init_connection(ctx.clone(), ipv4, false) {
+                        let ctx = ctx.clone();
+                        std::thread::spawn(move || speach::receive_messages_enc(ctx, node));
+                    }
+                }
+            }
+        }
+    }
+}
+
 pub fn process_message(ctx: Arc<Mutex<config::State>>, message: whisper::Message) {
     let myself_uuid = ctx.lock().unwrap().myself.uuid;
     if message.next_sender == myself_uuid {
@@ -154,57 +158,23 @@ pub fn process_message(ctx: Arc<Mutex<config::State>>, message: whisper::Message
     }
     match message.msgtype {
         whisper::MessageType::Text => {
-            // send the message to a client (in debug form for now)
+            // send the message to a client
             ctx.lock()
                 .unwrap()
                 .tx
                 .send(message)
                 .expect("Unable to send message to client!");
         }
-        // TODO: deprecating
-        whisper::MessageType::NewMember => {
-            greet_newcomer(ctx, message);
-        }
+        // reserved for handshake
+        whisper::MessageType::NewMember => {}
         whisper::MessageType::MissedMessagesRequest => {
             send_missed_messages(ctx.clone(), &message);
             send_network_info(ctx.clone(), &message);
         }
         // cannot happen, as those can only be unencrypted
         // and that is processed elsewhere, don't do anything
-        whisper::MessageType::EncryptionRequest => {},
-        whisper::MessageType::NetworkInfo => {
-            let tree = json::parse(&message.contents);
-            if tree.is_err() {
-                return;
-            }
-            let tree = tree.unwrap();
-            let myself = ctx.lock().unwrap().myself.clone();
-            log::info!("Tree: {}", tree);
-            for i in tree.members() {
-                log::info!("Pre-parsed: {}", i);
-                if let Some(field) = i.as_str() {
-                    log::info!("Field: {}", field);
-                    if let Ok(node) = crate::neighborhood::Node::from_str(field) {
-                        for i in ctx.lock().unwrap().connections.iter() {
-                            if *i == node {
-                                continue;
-                            }
-                        }
-                        if node == myself {
-                            continue;
-                        }
-                        ctx.lock().unwrap().network_info.push(node.clone());
-                        if let Some(ipv4) = node.address {
-                            if let Ok(node) = init_connection(ctx.clone(), ipv4, false) {
-                                log::info!("Connected to {}", node.to_string());
-                                let ctx = ctx.clone();
-                                std::thread::spawn(move || speach::receive_messages_enc(ctx, node));
-                            }
-                        }
-                    }
-                }
-            }
-        }
+        whisper::MessageType::EncryptionRequest => {}
+        whisper::MessageType::NetworkInfo => connect_to_reported(ctx.clone(), &message),
     }
 }
 

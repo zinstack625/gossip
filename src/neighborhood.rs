@@ -3,9 +3,7 @@ use std::net::{SocketAddr, TcpStream};
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 
-use crate::config;
-use crate::speach;
-use crate::whisper;
+use crate::{config, speach, whisper};
 
 pub struct Node {
     pub name: String,
@@ -95,11 +93,7 @@ impl Node {
             }),
         }
     }
-    pub fn with_address(
-        name: String,
-        uuid: u32,
-        address: SocketAddr,
-    ) -> Node {
+    pub fn with_address(name: String, uuid: u32, address: SocketAddr) -> Node {
         Node {
             name,
             uuid,
@@ -148,13 +142,13 @@ fn negotiate_encryption(ctx: Arc<Mutex<config::State>>, stream: &mut TcpStream) 
                 stream,
                 &ctx.lock().unwrap().enc_key.clone(),
                 &temp_encrypter,
-            );
+            )?;
             // ugly
             speach::send_encryption_data(
                 stream,
                 &ctx.lock().unwrap().myself.iv.clone(),
                 &temp_encrypter,
-            );
+            )?;
         } else {
             // TODO: report invalid auth data to peer
             return Err(std::io::Error::new(
@@ -179,16 +173,18 @@ fn get_listener_addr(message: &whisper::Message, stream: &TcpStream) -> Option<S
 // different in that people connect to us directly here instead of us receiving gossip
 pub fn receive_newcomer(ctx: Arc<Mutex<config::State>>, mut stream: TcpStream) -> Result<Node> {
     let message = speach::receive_greeting(&mut stream)?;
-    log::info!("New connection from {}\nWith greeting: {}\nAnd a node: {}",
-               stream.peer_addr().unwrap(),
-               message.to_string(),
-               message.sender.to_string());
+    log::info!(
+        "New connection from {}\nWith greeting: {}\nAnd a node: {}",
+        stream.peer_addr().unwrap(),
+        message.to_string(),
+        message.sender.to_string()
+    );
     speach::send_data(
         &mut stream,
         ctx.lock().unwrap().announcement.to_string().as_bytes(),
     )?;
     //if !message.contents.contains("gossipless") {
-        negotiate_encryption(ctx.clone(), &mut stream)?;
+    negotiate_encryption(ctx.clone(), &mut stream)?;
     //}
     // sender doesn't know it's address, so we tell everyone where from we got the
     // message
@@ -263,7 +259,7 @@ pub fn request_missed(ctx: &mut config::State) -> Result<()> {
             .as_mut()
             .unwrap(),
         &encrypted,
-    );
+    )?;
     // this will not return anything now, but server will catch up later just fine
     // will be fixed when this becomes client-side
     Ok(())

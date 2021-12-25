@@ -1,8 +1,5 @@
-use crate::neighborhood;
-use crate::whisper;
-use std::sync::mpsc::SendError;
-use std::sync::{mpsc, Arc, Mutex};
-
+use crate::{neighborhood, whisper};
+use std::sync::{mpsc, mpsc::SendError, Arc, Mutex};
 
 pub struct Config {
     pub max_send_peers: usize,
@@ -42,7 +39,11 @@ impl ClientHandle {
     pub fn update_config(&mut self, cfg: Config) -> Result<(), SendError<Config>> {
         self.config_tx.send(cfg)
     }
-    pub fn new(client_tx: mpsc::Sender<whisper::Message>, client_rx: Option<mpsc::Receiver<whisper::Message>>, config_tx: mpsc::Sender<Config>) -> ClientHandle {
+    pub fn new(
+        client_tx: mpsc::Sender<whisper::Message>,
+        client_rx: Option<mpsc::Receiver<whisper::Message>>,
+        config_tx: mpsc::Sender<Config>,
+    ) -> ClientHandle {
         ClientHandle {
             client_tx,
             client_rx,
@@ -53,7 +54,11 @@ impl ClientHandle {
 
 impl Clone for ClientHandle {
     fn clone(&self) -> ClientHandle {
-        ClientHandle { client_tx: self.client_tx.clone(), client_rx: None, config_tx: self.config_tx.clone() }
+        ClientHandle {
+            client_tx: self.client_tx.clone(),
+            client_rx: None,
+            config_tx: self.config_tx.clone(),
+        }
     }
 }
 

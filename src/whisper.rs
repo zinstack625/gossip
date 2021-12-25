@@ -1,5 +1,9 @@
 use openssl::symm::*;
-use std::{time::{Duration, UNIX_EPOCH}, fmt::Display, str::FromStr};
+use std::{
+    fmt::Display,
+    str::FromStr,
+    time::{Duration, UNIX_EPOCH},
+};
 
 use crate::neighborhood;
 
@@ -15,11 +19,11 @@ pub enum MessageType {
 impl Display for MessageType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let stringified = match self {
-            &MessageType::Text =>                     "Text",
-            &MessageType::NewMember =>                "NewMember",
-            &MessageType::EncryptionRequest =>        "EncryptionRequest",
-            &MessageType::MissedMessagesRequest =>    "MissedMessagesRequest",
-            &MessageType::NetworkInfo =>              "NetworkInfo",
+            &MessageType::Text => "Text",
+            &MessageType::NewMember => "NewMember",
+            &MessageType::EncryptionRequest => "EncryptionRequest",
+            &MessageType::MissedMessagesRequest => "MissedMessagesRequest",
+            &MessageType::NetworkInfo => "NetworkInfo",
         };
         write!(f, "{}", stringified)
     }
@@ -29,14 +33,15 @@ impl FromStr for MessageType {
     type Err = std::io::Error;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let result = match s {
-            "Text" =>                   Ok(MessageType::Text),
-            "NewMember" =>              Ok(MessageType::NewMember),
-            "EncryptionRequest" =>      Ok(MessageType::EncryptionRequest),
-            "MissedMessagesRequest" =>  Ok(MessageType::MissedMessagesRequest),
-            "NetworkInfo" =>            Ok(MessageType::NetworkInfo),
+            "Text" => Ok(MessageType::Text),
+            "NewMember" => Ok(MessageType::NewMember),
+            "EncryptionRequest" => Ok(MessageType::EncryptionRequest),
+            "MissedMessagesRequest" => Ok(MessageType::MissedMessagesRequest),
+            "NetworkInfo" => Ok(MessageType::NetworkInfo),
             _ => Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    "Unsupported message type"))
+                std::io::ErrorKind::InvalidData,
+                "Unsupported message type",
+            )),
         };
         result
     }
@@ -71,11 +76,7 @@ impl Message {
             timestamp,
         }
     }
-    pub fn from_client(
-        msgtype: MessageType,
-        self_name: &String,
-        contents: &String,
-        ) -> Message {
+    pub fn from_client(msgtype: MessageType, self_name: &String, contents: &String) -> Message {
         Message {
             msgtype,
             sender: neighborhood::Node::new(self_name.clone(), 0, None),

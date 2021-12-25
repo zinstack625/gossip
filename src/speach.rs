@@ -1,14 +1,37 @@
-use openssl::encrypt::{Decrypter, Encrypter};
-use openssl::rsa::Rsa;
-use openssl::symm::*;
+use openssl::{
+    encrypt::{Decrypter, Encrypter},
+    rsa::Rsa,
+    symm::*,
+};
 use std::io::prelude::*;
 use std::net::{SocketAddr, TcpStream};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use crate::config;
-use crate::neighborhood;
-use crate::whisper;
+use crate::{config, neighborhood, speach, whisper};
+
+fn resend_encryption(ctx: &mut config::State, node: &mut neighborhood::Node) {
+     let public_key = encryption_request.contents.as_bytes();
+     let pkey_temp = openssl::pkey::PKey::public_key_from_pem(public_key).unwrap();
+     let temp_encrypter = openssl::encrypt::Encrypter::new(&pkey_temp).unwrap();
+     speach::send_encryption_data(
+         node.stream.as_mut().unwrap(),
+         &ctx.enc_key,
+         &temp_encrypter,
+     );
+     speach::send_encryption_data(
+         node.stream.as_mut().unwrap(),
+         &ctx.myself.iv,
+         &temp_encrypter,
+     );
+     node.iv = ctx.myself.iv.clone();
+     for i in ctx.connections.iter_mut() {
+         if node == *i {
+             i.iv = node.iv.clone();
+             break;
+         }
+     }
+}
 
 pub fn receive_messages_enc(ctx: Arc<Mutex<config::State>>, mut node: neighborhood::Node) {
     if node.stream.is_none() {
@@ -25,10 +48,22 @@ pub fn receive_messages_enc(ctx: Arc<Mutex<config::State>>, mut node: neighborho
             let buffer_size = u64::from_be_bytes(buffer_size);
             let mut buffer = vec![0u8; buffer_size as usize];
             let _ = node.stream.as_mut().unwrap().read_exact(&mut buffer);
+            let mut connection_relevant = false;
             for i in ctx.connections.iter() {
                 if node == *i {
                     node.iv = i.iv.clone();
+                    connection_relevant = true;
+                    break;
                 }
+            }
+            if !connection_relevant {
+                return;
+            }
+            if let Ok(packet) = std::str::from_utf8(&buffer) {
+                if let Ok(encryption_request) = whisper::Message::from_str(packet) {
+                    resend_encryption(&mut ctx, &mut node);
+                }
+                continue;
             }
             let decrypt = Crypter::new(ctx.cipher, Mode::Decrypt, &ctx.enc_key, Some(&node.iv));
             if decrypt.is_err() {
@@ -40,7 +75,7 @@ pub fn receive_messages_enc(ctx: Arc<Mutex<config::State>>, mut node: neighborho
                 let count = decrypt.update(&buffer, &mut decrypted).unwrap();
                 decrypted.truncate(count);
                 if let Ok(packet) = std::str::from_utf8(&decrypted) {
-                    if let Ok(mut msg) = whisper::Message::from_str(packet) {
+                    if let Ok(msg) = whisper::Message::from_str(packet) {
                         node.iv = msg.next_iv.clone();
                         for i in ctx.connections.iter_mut() {
                             if node == *i {
@@ -48,46 +83,22 @@ pub fn receive_messages_enc(ctx: Arc<Mutex<config::State>>, mut node: neighborho
                             }
                         }
                         ctx.receiver_tx.send(msg);
+                    } else {
+                        // need to reestablish encryption
+                        let key = get_key(&mut node, &ctx.myself).unwrap_or_default();
+                        if key != ctx.enc_key {
+                            // other side lost the key, abort
+                            return;
+                        }
+                    }
+                } else {
+                    let key = get_key(&mut node, &ctx.myself).unwrap_or_default();
+                    if key != ctx.enc_key {
+                        return;
                     }
                 }
             }
         }
-    }
-}
-
-pub fn spread_gossip(ctx: &mut config::State, mailbox: Vec<whisper::Message>) {
-    let mut to_send = Vec::<u32>::with_capacity(ctx.connections.len());
-    for i in ctx.connections.iter() {
-        if i.stream.is_some() {
-            to_send.push(i.uuid);
-        }
-    }
-    // mutex should be dropped right away, as there's no name assigned to mutex handler,
-    // meaning it'll get dropped right away
-    let mut send_limit = ctx.config.try_lock().unwrap().max_send_peers;
-    for i in ctx.connections.iter_mut() {
-        if send_limit == 0 {
-            return;
-        }
-        if i.stream.is_none() {
-            continue;
-        }
-        // it is essential to send each and every message here if possible, otherwise data will be lost in the network
-        for mut j in mailbox.clone() {
-            if !j.aquaintance.contains(&i.uuid) {
-                // have to let the receiver know who's seen the message already
-                for k in to_send.iter() {
-                    j.aquaintance.push(*k);
-                }
-                j.next_sender = *to_send.last().unwrap();
-                openssl::rand::rand_bytes(&mut j.next_iv);
-                let encrypted = j.encrypt(&ctx.cipher, &ctx.enc_key, &i.iv).unwrap();
-                i.iv = j.next_iv.clone();
-                // TODO: ask someone else to deliver this message if this fails
-                send_data(i.stream.as_mut().unwrap(), &encrypted);
-            }
-        }
-        send_limit -= 1;
     }
 }
 
@@ -127,7 +138,7 @@ pub fn init_connection(
 ) -> Result<neighborhood::Node, std::io::Error> {
     log::info!("Connecting to {}", address);
     let mut stream = TcpStream::connect(address)?;
-    stream.set_nonblocking(false);
+    stream.set_nonblocking(false)?;
     let mut announcement = ctx.lock().unwrap().announcement.clone();
     if !announce_me {
         announcement.contents = "gossipless".to_string();
@@ -136,11 +147,9 @@ pub fn init_connection(
     if let Ok(reply) = receive_greeting(&mut stream) {
         let mut peer = neighborhood::Node::new(reply.sender.name, reply.sender.uuid, Some(stream));
         if let Ok(mut ctx) = ctx.lock() {
-            //if ctx.enc_key.is_empty() {
-                if let Ok(key) = get_key(&mut peer, &ctx.myself) {
-                    ctx.enc_key = key;
-                }
-            //}
+            if let Ok(key) = get_key(&mut peer, &ctx.myself) {
+                ctx.enc_key = key;
+            }
             ctx.connections.push(peer.clone());
         }
         log::info!("Connection inited");

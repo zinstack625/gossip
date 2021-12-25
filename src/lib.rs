@@ -4,11 +4,11 @@ use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 
 pub mod config;
+pub mod error;
 pub mod neighborhood;
 mod politeness;
 mod speach;
 pub mod whisper;
-pub mod error;
 
 use neighborhood::*;
 
@@ -44,7 +44,8 @@ fn server_thread(state: Arc<Mutex<config::State>>, receiver_rx: mpsc::Receiver<w
     let mut postponed_storage = Vec::<whisper::Message>::new();
     loop {
         let mut msg = receiver_rx.recv().expect("MPSC queue broken");
-        msg.next_iv.resize(state.lock().unwrap().cipher.iv_len().unwrap(), 0u8);
+        msg.next_iv
+            .resize(state.lock().unwrap().cipher.iv_len().unwrap(), 0u8);
         if let Ok(_) = politeness::store_text_messages(state.clone(), &postponed_storage) {
             postponed_storage.clear();
         }
@@ -85,6 +86,7 @@ fn gossiper_thread(ctx: Arc<Mutex<config::State>>, gossiper_rx: mpsc::Receiver<w
             continue;
         }
         let mut msg = msg.unwrap();
+        log::info!("Got a message to gossip: {}", msg.to_string());
         let mut ctx = ctx.lock().unwrap();
         let mut to_send = Vec::<u32>::with_capacity(ctx.connections.len());
         for i in ctx.connections.iter() {
@@ -103,11 +105,15 @@ fn gossiper_thread(ctx: Arc<Mutex<config::State>>, gossiper_rx: mpsc::Receiver<w
         let enc_key = ctx.enc_key.clone();
         for i in ctx.connections.iter_mut() {
             if send_limit == 0 {
-                return;
+                continue;
             }
             if i.stream.is_none() {
                 continue;
             }
+            if !to_send.contains(&i.uuid) {
+                continue;
+            }
+            log::info!("Gossiping to {}", i.to_string());
             // it is essential to send each and every message here if possible, otherwise data will be lost in the network
             // have to let the receiver know who's seen the message already
             openssl::rand::rand_bytes(&mut msg.next_iv);
@@ -121,19 +127,13 @@ fn gossiper_thread(ctx: Arc<Mutex<config::State>>, gossiper_rx: mpsc::Receiver<w
     }
 }
 
-pub fn spawn_server(
-    client_name: String,
-    init_nodes: Vec<SocketAddr>,
-) -> config::ClientHandle {
+pub fn spawn_server(client_name: String, init_nodes: Vec<SocketAddr>) -> config::ClientHandle {
     // initializing stuff
     let uuid: u32 = rand::thread_rng().gen();
     log::info!("I am {}", uuid);
     let cipher = openssl::symm::Cipher::aes_256_gcm();
-    let mut myself = neighborhood::Node::with_address(
-        client_name.clone(),
-        uuid,
-        "0.0.0.0:0".parse().unwrap(),
-    );
+    let myself =
+        neighborhood::Node::with_address(client_name.clone(), uuid, "0.0.0.0:0".parse().unwrap());
     log::info!("Myself pre-ready: {}", myself.to_string());
     let announcement = whisper::Message::new(
         whisper::MessageType::NewMember,
@@ -196,9 +196,5 @@ pub fn spawn_server(
     let _gossiper_thread = thread::spawn(move || gossiper_thread(gossiper_ctx, gossiper_rx));
     let _server_thread = thread::spawn(move || server_thread(init_state, receiver_rx));
 
-    config::ClientHandle::new(
-        client_tx,
-        Some(client_rx),
-        config_tx,
-    )
+    config::ClientHandle::new(client_tx, Some(client_rx), config_tx)
 }
