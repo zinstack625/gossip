@@ -12,7 +12,6 @@ pub struct Node {
     pub uuid: u32,
     pub stream: Option<TcpStream>,
     pub address: Option<SocketAddr>,
-    pub addressv6: Option<SocketAddr>,
     pub iv: Vec<u8>,
 }
 
@@ -32,7 +31,6 @@ impl Clone for Node {
                 None => None,
             },
             address: self.address.clone(),
-            addressv6: self.addressv6.clone(),
             iv: match &self.stream {
                 Some(_) => self.iv.clone(),
                 None => vec![0; 12],
@@ -52,10 +50,6 @@ impl Node {
             name: self.name.clone(),
             uuid: self.uuid,
             address: match self.address {
-                Some(addr) => addr.to_string(),
-                None => "None".to_string()
-            },
-            addressv6: match self.addressv6 {
                 Some(addr) => addr.to_string(),
                 None => "None".to_string()
             },
@@ -97,17 +91,6 @@ impl Node {
                     }
                     result
                 },
-                addressv6: {
-                    let mut result = None;
-                    if let Some(string) = json_tree["addressv6"].take_string() {
-                        if let Ok(res) = SocketAddr::from_str(&string) {
-                            if res.is_ipv6() {
-                                result = Some(res);
-                            }
-                        }
-                    }
-                    result
-                },
                 iv: vec![0; 12],
             }),
         }
@@ -116,22 +99,12 @@ impl Node {
         name: String,
         uuid: u32,
         address: SocketAddr,
-        addressv6: SocketAddr,
     ) -> Node {
-        let mut addrv4 = None;
-        let mut addrv6 = None;
-        if address.is_ipv4() {
-            addrv4 = Some(address);
-        }
-        if addressv6.is_ipv6() {
-            addrv6 = Some(address);
-        }
         Node {
             name,
             uuid,
             stream: None,
-            address: addrv4,
-            addressv6: addrv6,
+            address: Some(address),
             iv: vec![0; 12],
         }
     }
@@ -150,89 +123,87 @@ impl Node {
                 }
                 result
             },
-            addressv6: {
-                let mut result = None;
-                if let Some(ref stream) = stream {
-                    if let Ok(addr) = stream.peer_addr() {
-                        if addr.is_ipv4() {
-                            result = Some(addr);
-                        }
-                    }
-                }
-                result
-            },
             stream,
             iv: vec![0; 12],
         }
     }
 }
 
+fn negotiate_encryption(ctx: Arc<Mutex<config::State>>, stream: &mut TcpStream) -> Result<()> {
+    let requests = speach::receive_greeting(stream);
+    let mut encryption_request: Option<whisper::Message> = None;
+    for i in requests {
+        if i.msgtype == whisper::MessageType::EncryptionRequest {
+            encryption_request = Some(i);
+            break;
+        }
+    }
+    if let Some(encryption_request) = encryption_request {
+        let public_key = encryption_request.contents.as_bytes();
+        let pkey_temp = openssl::pkey::PKey::public_key_from_pem(public_key).unwrap();
+        let temp_encrypter = openssl::encrypt::Encrypter::new(&pkey_temp).unwrap();
+        if speach::authenticate(&encryption_request.sender, stream) {
+            // TODO: think about what to do when this fails
+            speach::send_encryption_data(
+                stream,
+                &ctx.lock().unwrap().enc_key.clone(),
+                &temp_encrypter,
+            );
+            // ugly
+            speach::send_encryption_data(
+                stream,
+                &ctx.lock().unwrap().myself.iv.clone(),
+                &temp_encrypter,
+            );
+        } else {
+            // TODO: report invalid auth data to peer
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "Auth failed",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn get_listener_addr(message: &whisper::Message, stream: &TcpStream) -> Option<SocketAddr> {
+    let mut listen_addr = None;
+    let stream_addr = stream.peer_addr().unwrap();
+    if message.sender.address.is_some() {
+        listen_addr = message.sender.address;
+        listen_addr.as_mut().unwrap().set_ip(stream_addr.ip());
+    }
+    listen_addr
+}
+
 // different in that people connect to us directly here instead of us receiving gossip
 pub fn receive_newcomer(ctx: Arc<Mutex<config::State>>, mut stream: TcpStream) -> Result<Node> {
-    let mut message = speach::receive_greeting(&mut stream)?;
-    log::info!("New connection from {}", stream.peer_addr().unwrap());
+    let message = speach::receive_greeting(&mut stream)?;
+    log::info!("New connection from {}\nWith greeting: {}\nAnd a node: {}",
+               stream.peer_addr().unwrap(),
+               message.to_string(),
+               message.sender.to_string());
     speach::send_data(
         &mut stream,
         ctx.lock().unwrap().announcement.to_string().as_bytes(),
     )?;
-    if !message.contents.contains("gossipless") {
-        // sender should ask about encryption now
-        let requests = speach::receive_greeting(&mut stream);
-        let mut encryption_request: Option<whisper::Message> = None;
-        for i in requests {
-            if i.msgtype == whisper::MessageType::EncryptionRequest {
-                encryption_request = Some(i);
-                break;
-            }
-        }
-        if let Some(encryption_request) = encryption_request {
-            let public_key = encryption_request.contents.as_bytes();
-            let pkey_temp = openssl::pkey::PKey::public_key_from_pem(public_key).unwrap();
-            let temp_encrypter = openssl::encrypt::Encrypter::new(&pkey_temp).unwrap();
-            if speach::authenticate(&encryption_request.sender, &mut stream) {
-                // TODO: think about what to do when this fails
-                speach::send_encryption_data(
-                    &mut stream,
-                    &ctx.lock().unwrap().enc_key.clone(),
-                    &temp_encrypter,
-                );
-                // ugly
-                speach::send_encryption_data(
-                    &mut stream,
-                    &ctx.lock().unwrap().myself.iv.clone(),
-                    &temp_encrypter,
-                );
-            } else {
-                // TODO: report invalid auth data to peer
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    "Auth failed",
-                ));
-            }
-        }
-    }
+    //if !message.contents.contains("gossipless") {
+        negotiate_encryption(ctx.clone(), &mut stream)?;
+    //}
     // sender doesn't know it's address, so we tell everyone where from we got the
     // message
-    let msg_addr = &mut message.sender.address;
-    let msg_addrv6 = &mut message.sender.addressv6;
-    let stream_addr = stream.peer_addr().expect("Lost connection at handshake");
-    if stream_addr.is_ipv4() {
-        *msg_addr = Some(stream_addr);
-    }
-    if stream_addr.is_ipv6() {
-        *msg_addrv6 = Some(stream_addr);
-    }
+    let mut orig_sender = message.sender.clone();
+    orig_sender.address = get_listener_addr(&message, &stream);
+    ctx.lock().unwrap().network_info.push(orig_sender);
+    // don't share the newcomer with the network
+    // instead let the newcomer connect to everyone
+    //ctx.lock().unwrap().gossiper_tx.send(message)
     let mut new_node = Node::new(
         message.sender.name.clone(),
         message.sender.uuid,
         Some(stream),
     );
-    // don't share the newcomer with the network
-    // instead let the newcomer connect to everyone
-    //ctx.lock().unwrap().gossiper_tx.send(message);
     new_node.iv = ctx.lock().unwrap().myself.iv.clone();
-    new_node.address = msg_addr.clone();
-    new_node.addressv6 = msg_addrv6.clone();
     Ok(new_node)
 }
 

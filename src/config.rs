@@ -64,6 +64,7 @@ pub struct State {
     pub myself: neighborhood::Node,
     pub announcement: whisper::Message,
     pub connections: Vec<neighborhood::Node>,
+    pub network_info: Vec<neighborhood::Node>,
     pub enc_key: Vec<u8>,
     pub config: Arc<Mutex<Config>>,
     pub tx: mpsc::Sender<whisper::Message>,

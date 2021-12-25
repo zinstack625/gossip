@@ -1,4 +1,5 @@
 use crate::config;
+use crate::neighborhood;
 use crate::speach;
 use crate::speach::init_connection;
 use crate::whisper;
@@ -17,24 +18,14 @@ pub fn greet_newcomer(ctx: Arc<Mutex<config::State>>, msg: whisper::Message) {
     if address.is_some() {
         log::info!("Was told to connect to {}", address.unwrap().to_string());
     }
-    let addressv6 = newcomer.addressv6.as_ref();
-    if addressv6.is_some() {
-        log::info!("Was told to connect to {}", addressv6.unwrap().to_string());
-    }
     for i in ctx.lock().unwrap().connections.iter() {
         if i.uuid == newcomer.uuid {
             return;
         }
     }
     let connect_addr = newcomer.address.as_ref();
-    let connect_addrv6 = newcomer.addressv6.as_ref();
     if connect_addr.is_some() {
         if let Ok(node) = speach::init_connection(ctx.clone(), newcomer.address.unwrap(), false) {
-            let ctx = ctx.clone();
-            std::thread::spawn(move || speach::receive_messages_enc(ctx, node));
-        }
-    } else if connect_addrv6.is_some() {
-        if let Ok(node) = speach::init_connection(ctx.clone(), newcomer.addressv6.unwrap(), false) {
             let ctx = ctx.clone();
             std::thread::spawn(move || speach::receive_messages_enc(ctx, node));
         }
@@ -51,6 +42,7 @@ pub fn client_duty(
             msg.sender = ctx.lock().unwrap().myself.clone();
             msg.next_iv = vec![0u8; ctx.lock().unwrap().cipher.iv_len().unwrap()];
             let send_limit = ctx.lock().unwrap().config.lock().unwrap().max_send_peers;
+            log::info!("Preparing to send to {} recipients", send_limit);
             let mut to_send = Vec::<u32>::with_capacity(send_limit);
             for i in ctx.lock().unwrap().connections.iter() {
                 if to_send.len() < send_limit
@@ -69,18 +61,88 @@ pub fn client_duty(
                 continue;
             }
             let mut ctx = ctx.lock().unwrap();
+            log::info!("Connections:");
+            for i in ctx.connections.iter() {
+                log::info!("{}", i.to_string());
+            }
             let cipher = ctx.cipher.clone();
             let enc_key = ctx.enc_key.clone();
             for i in ctx.connections.iter_mut() {
                 if !to_send.contains(&i.uuid) || i.stream.is_none() {
                     continue;
                 }
+                log::info!("Sending to {}", i.uuid);
                 openssl::rand::rand_bytes(&mut msg.next_iv);
                 let encrypted = msg.encrypt(&cipher, &enc_key, &i.iv).unwrap();
                 i.iv = msg.next_iv.clone();
                 speach::send_data(i.stream.as_mut().unwrap(), &encrypted);
             }
         }
+    }
+}
+
+fn find_sender<'a>(ctx: &'a mut config::State, msg_sender: &neighborhood::Node) -> Option<&'a mut neighborhood::Node> {
+    let mut sender = None;
+    for j in ctx.connections.iter_mut() {
+        if *msg_sender == *j {
+            sender = Some(j);
+            break;
+        }
+    }
+    sender
+}
+
+fn send_missed_messages(ctx: Arc<Mutex<config::State>>, message: &whisper::Message) {
+    let mut ctx = ctx.lock().unwrap();
+    let msgs = get_stored_messages(&ctx);
+    if msgs.is_err() {
+        return;
+    }
+    let msgs = msgs.unwrap();
+    let mut first_missed = None;
+    for j in msgs.iter().enumerate() {
+        if j.1.timestamp == message.timestamp {
+            first_missed = Some(j.0);
+            break;
+        }
+    }
+    let cipher = ctx.cipher.clone();
+    let enc_key = ctx.enc_key.clone();
+    if let Some(sender) = find_sender(&mut ctx, &message.sender) {
+        if first_missed.is_some() {
+            let first_missed = first_missed.unwrap();
+            for mut j in msgs[first_missed..].to_vec() {
+                openssl::rand::rand_bytes(&mut j.next_iv);
+                let encrypted = j.encrypt(&cipher, &enc_key, &sender.iv).unwrap();
+                speach::send_data(sender.stream.as_mut().unwrap(), &encrypted);
+                sender.iv = j.next_iv.clone();
+            }
+        }
+    }
+}
+
+fn send_network_info(ctx: Arc<Mutex<config::State>>, message: &whisper::Message) {
+    let mut ctx = ctx.lock().unwrap();
+    let mut json_con_array = json::JsonValue::new_array();
+    for i in ctx.network_info.iter() {
+        json_con_array.push(i.to_string());
+    }
+    let mut network_info = whisper::Message::new(
+        whisper::MessageType::NetworkInfo,
+        &ctx.myself,
+        &json_con_array.to_string(),
+        vec![ctx.myself.uuid],
+        0,
+        &vec![0u8; ctx.cipher.iv_len().unwrap_or_default()],
+        std::time::SystemTime::now()
+    );
+    let cipher = ctx.cipher.clone();
+    let enc_key = ctx.enc_key.clone();
+    if let Some(sender) = find_sender(&mut ctx, &message.sender) {
+        openssl::rand::rand_bytes(&mut network_info.next_iv);
+        let encrypted = network_info.encrypt(&cipher, &enc_key, &sender.iv).unwrap();
+        speach::send_data(sender.stream.as_mut().unwrap(), &encrypted);
+        sender.iv = network_info.next_iv.clone();
     }
 }
 
@@ -104,60 +166,8 @@ pub fn process_message(ctx: Arc<Mutex<config::State>>, message: whisper::Message
             greet_newcomer(ctx, message);
         }
         whisper::MessageType::MissedMessagesRequest => {
-            // send missed messages
-            // better to get mutex for the whole operation
-            let mut ctx = ctx.lock().unwrap();
-            let cipher = ctx.cipher.clone();
-            let enc_key = ctx.enc_key.clone();
-            let myself = ctx.myself.clone();
-            let msgs = get_stored_messages(&ctx);
-            if msgs.is_err() {
-                return;
-            }
-            let msgs = msgs.unwrap();
-            let mut sender = None;
-            let mut json_con_array = json::JsonValue::new_array();
-            for j in ctx.connections.iter_mut() {
-                json_con_array.push(j.to_string());
-                if message.sender == *j {
-                    sender = Some(j);
-                    break;
-                }
-            }
-            if sender.is_none() {
-                return;
-            }
-            let sender = sender.unwrap();
-            let mut first_missed = None;
-            for j in msgs.iter().enumerate() {
-                if j.1.timestamp == message.timestamp {
-                    first_missed = Some(j.0);
-                    break;
-                }
-            }
-            if first_missed.is_some() {
-                let first_missed = first_missed.unwrap();
-                for mut j in msgs[first_missed..].to_vec() {
-                    openssl::rand::rand_bytes(&mut j.next_iv);
-                    let encrypted = j.encrypt(&cipher, &enc_key, &sender.iv).unwrap();
-                    speach::send_data(sender.stream.as_mut().unwrap(), &encrypted);
-                    sender.iv = j.next_iv.clone();
-                }
-            }
-            // send network info
-            let mut network_info = whisper::Message::new(
-                whisper::MessageType::NetworkInfo,
-                &myself,
-                &json_con_array.to_string(),
-                vec![myself.uuid],
-                0,
-                &vec![0u8; cipher.iv_len().unwrap_or_default()],
-                std::time::SystemTime::now()
-            );
-            openssl::rand::rand_bytes(&mut network_info.next_iv);
-            let encrypted = network_info.encrypt(&cipher, &enc_key, &sender.iv).unwrap();
-            speach::send_data(sender.stream.as_mut().unwrap(), &encrypted);
-            sender.iv = network_info.next_iv.clone();
+            send_missed_messages(ctx.clone(), &message);
+            send_network_info(ctx.clone(), &message);
         }
         // cannot happen, as those can only be unencrypted
         // and that is processed elsewhere, don't do anything
@@ -169,7 +179,9 @@ pub fn process_message(ctx: Arc<Mutex<config::State>>, message: whisper::Message
             }
             let tree = tree.unwrap();
             let myself = ctx.lock().unwrap().myself.clone();
+            log::info!("Tree: {}", tree);
             for i in tree.members() {
+                log::info!("Pre-parsed: {}", i);
                 if let Some(field) = i.as_str() {
                     log::info!("Field: {}", field);
                     if let Ok(node) = crate::neighborhood::Node::from_str(field) {
@@ -181,20 +193,12 @@ pub fn process_message(ctx: Arc<Mutex<config::State>>, message: whisper::Message
                         if node == myself {
                             continue;
                         }
+                        ctx.lock().unwrap().network_info.push(node.clone());
                         if let Some(ipv4) = node.address {
-                            if let Ok(node) = init_connection(ctx.clone(), ipv4, true) {
-                                ctx.lock().unwrap().connections.push(node.clone());
+                            if let Ok(node) = init_connection(ctx.clone(), ipv4, false) {
+                                log::info!("Connected to {}", node.to_string());
                                 let ctx = ctx.clone();
                                 std::thread::spawn(move || speach::receive_messages_enc(ctx, node));
-                                return;
-                            }
-                        }
-                        if let Some(ipv6) = node.addressv6 {
-                            if let Ok(node) = init_connection(ctx.clone(), ipv6, true) {
-                                ctx.lock().unwrap().connections.push(node.clone());
-                                let ctx = ctx.clone();
-                                std::thread::spawn(move || speach::receive_messages_enc(ctx, node));
-                                return;
                             }
                         }
                     }

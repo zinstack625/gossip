@@ -102,6 +102,7 @@ pub fn receive_greeting(stream: &mut TcpStream) -> Result<whisper::Message, std:
         let _ = stream.read_exact(&mut buffer);
         if let Ok(packet) = std::str::from_utf8(&buffer) {
             if let Ok(msg) = whisper::Message::from_str(packet) {
+                log::info!("Greeting: {}", msg.to_string());
                 return Ok(msg);
             }
         }
@@ -136,11 +137,11 @@ pub fn init_connection(
     if let Ok(reply) = receive_greeting(&mut stream) {
         let mut peer = neighborhood::Node::new(reply.sender.name, reply.sender.uuid, Some(stream));
         if let Ok(mut ctx) = ctx.lock() {
-            if ctx.enc_key.is_empty() {
+            //if ctx.enc_key.is_empty() {
                 if let Ok(key) = get_key(&mut peer, &ctx.myself) {
                     ctx.enc_key = key;
                 }
-            }
+            //}
             ctx.connections.push(peer.clone());
         }
         log::info!("Connection inited");
@@ -158,6 +159,7 @@ pub fn initial_connections(ctx: Arc<Mutex<config::State>>, init_nodes: Vec<Socke
     for i in init_nodes {
         if let Ok(node) = init_connection(ctx.clone(), i, true) {
             at_least_some = true;
+            ctx.lock().unwrap().network_info.push(node.clone());
             let ctx = ctx.clone();
             std::thread::spawn(move || receive_messages_enc(ctx, node));
         } // else report that failed to connect to certain node

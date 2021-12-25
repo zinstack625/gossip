@@ -133,8 +133,8 @@ pub fn spawn_server(
         client_name.clone(),
         uuid,
         "0.0.0.0:0".parse().unwrap(),
-        "[::]:0".parse().unwrap(),
     );
+    log::info!("Myself pre-ready: {}", myself.to_string());
     let announcement = whisper::Message::new(
         whisper::MessageType::NewMember,
         &myself,
@@ -157,12 +157,12 @@ pub fn spawn_server(
         myself,
         announcement,
         connections: vec![],
+        network_info: vec![],
         enc_key: vec![],
         config,
         tx,
     }));
     let port = spawn_listener(init_state.clone(), "127.0.0.1".parse().unwrap(), 42378);
-    let portv6 = spawn_listener(init_state.clone(), "::".parse().unwrap(), 42378);
     {
         let mut ctx = init_state.lock().unwrap();
         let my_addr = ctx.myself.address.as_mut();
@@ -170,28 +170,18 @@ pub fn spawn_server(
             log::info!("Setting IPV4 port: {}", port);
             my_addr.unwrap().set_port(port);
         }
-        let my_addrv6 = ctx.myself.addressv6.as_mut();
-        if my_addrv6.is_some() {
-            log::info!("Setting IPV6 port: {}", portv6);
-            my_addrv6.unwrap().set_port(portv6);
-        }
         let my_ann_addr = ctx.announcement.sender.address.as_mut();
         if my_ann_addr.is_some() {
             log::info!("Setting IPV4 port in announcement: {}", port);
             my_ann_addr.unwrap().set_port(port);
-        }
-        let my_ann_addrv6 = ctx.announcement.sender.addressv6.as_mut();
-        if my_ann_addrv6.is_some() {
-            log::info!("Setting IPV6 port in announcement: {}", portv6);
-            my_ann_addrv6.unwrap().set_port(portv6);
         }
     }
     log::info!(
         "Ready announcement: {}",
         init_state.lock().unwrap().announcement.to_string()
     );
-    // first node in the network
     if !speach::initial_connections(init_state.clone(), init_nodes) {
+        // first node in the network
         let mut ctx = init_state.lock().unwrap();
         ctx.myself.iv.resize(cipher.iv_len().unwrap_or_default(), 0);
         ctx.enc_key = vec![0u8; cipher.key_len()];
