@@ -2,10 +2,12 @@
 name = "gossip"
 version = "0.2.0"
 edition = "2021"
+license = "BSD-3-Clause"
+authors = [ "Anton Klimanov <klimanov625@outlook.com>" ]
 
 [dependencies]
-json = "0.12.4"
-rand = "0.8.4"
-openssl = "0.10.35"
-sled = "0.34.7"
-log = "0.4.14"
+json = "^0.12.4"
+rand = "^0.8.4"
+openssl = "^0.10.35"
+sled = "^0.34.7"
+log = "^0.4.14"
