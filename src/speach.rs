@@ -10,27 +10,27 @@ use std::time::Duration;
 
 use crate::{config, neighborhood, speach, whisper};
 
-fn resend_encryption(ctx: &mut config::State, node: &mut neighborhood::Node) {
-     let public_key = encryption_request.contents.as_bytes();
-     let pkey_temp = openssl::pkey::PKey::public_key_from_pem(public_key).unwrap();
-     let temp_encrypter = openssl::encrypt::Encrypter::new(&pkey_temp).unwrap();
-     speach::send_encryption_data(
-         node.stream.as_mut().unwrap(),
-         &ctx.enc_key,
-         &temp_encrypter,
-     );
-     speach::send_encryption_data(
-         node.stream.as_mut().unwrap(),
-         &ctx.myself.iv,
-         &temp_encrypter,
-     );
-     node.iv = ctx.myself.iv.clone();
-     for i in ctx.connections.iter_mut() {
-         if node == *i {
-             i.iv = node.iv.clone();
-             break;
-         }
-     }
+fn resend_encryption(
+    ctx: &mut config::State,
+    node: &mut neighborhood::Node,
+    encryption_request: whisper::Message,
+) {
+    let public_key = encryption_request.contents.as_bytes();
+    let pkey_temp = openssl::pkey::PKey::public_key_from_pem(public_key).unwrap();
+    let temp_encrypter = openssl::encrypt::Encrypter::new(&pkey_temp).unwrap();
+    speach::send_encryption_data(node.stream.as_mut().unwrap(), &ctx.enc_key, &temp_encrypter);
+    speach::send_encryption_data(
+        node.stream.as_mut().unwrap(),
+        &ctx.myself.iv,
+        &temp_encrypter,
+    );
+    node.iv = ctx.myself.iv.clone();
+    for i in ctx.connections.iter_mut() {
+        if *node == *i {
+            i.iv = node.iv.clone();
+            break;
+        }
+    }
 }
 
 pub fn receive_messages_enc(ctx: Arc<Mutex<config::State>>, mut node: neighborhood::Node) {
@@ -61,7 +61,7 @@ pub fn receive_messages_enc(ctx: Arc<Mutex<config::State>>, mut node: neighborho
             }
             if let Ok(packet) = std::str::from_utf8(&buffer) {
                 if let Ok(encryption_request) = whisper::Message::from_str(packet) {
-                    resend_encryption(&mut ctx, &mut node);
+                    resend_encryption(&mut ctx, &mut node, encryption_request);
                 }
                 continue;
             }
